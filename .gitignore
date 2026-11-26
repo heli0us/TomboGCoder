@@ -1,0 +1,14 @@
+node_modules/
+dist/
+dist-portable/
+src-tauri/target/
+.DS_Store
+*.log
+
+# 現場NCデータの誤コミット防止
+*.nc
+*.NC
+*.dnc
+*.DNC
+*.tap
+*.TAP

@@ -1,0 +1,20 @@
+[package]
+name = "tombo-gcoder"
+version = "0.1.0"
+description = "FANUC 3軸マシニングセンタ向け NCプログラムビューア＆検証ツール"
+authors = ["TomboGCoder"]
+edition = "2021"
+
+[lib]
+name = "tombo_gcoder_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+encoding_rs = "0.8"

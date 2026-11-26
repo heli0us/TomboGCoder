@@ -1,0 +1,145 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  --vsc-bg: #1f1f1f;
+  --vsc-sidebar: #181818;
+  --vsc-border: #2b2b2b;
+  --vsc-hover: #2a2d2e;
+  --vsc-active: #094771;
+  --vsc-accent: #0078d4;
+  --vsc-text: #cccccc;
+  --vsc-muted: #858585;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: var(--vsc-bg);
+  color: var(--vsc-text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", "Yu Gothic UI", sans-serif;
+  font-size: 13px;
+}
+
+/* VS Code Modern Dark スクロールバー */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(130, 130, 130, 0.28);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(130, 130, 130, 0.55);
+}
+
+/* CodeMirror 6 コンテナ調整 */
+.cm-editor {
+  height: 100%;
+  background-color: #1f1f1f !important;
+  font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, "Courier New", monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.cm-editor.cm-focused {
+  outline: none !important;
+}
+.cm-scroller {
+  overflow: auto;
+}
+.cm-gutters {
+  background-color: #1f1f1f !important;
+  border-right: 1px solid #2b2b2b !important;
+  color: #6e7681 !important;
+}
+.cm-activeLineGutter {
+  background-color: #282828 !important;
+  color: #d4d4d4 !important;
+}
+
+/* トレース中の現在行ハイライト */
+.cm-trace-active-line {
+  background-color: rgba(0, 120, 212, 0.34) !important;
+  box-shadow: inset 3px 0 0 #38bdf8;
+}
+
+/* 診断エラー・警告行の背景 */
+.cm-diag-error-line {
+  background-color: rgba(248, 113, 113, 0.16) !important;
+  text-decoration: wavy underline rgba(248, 113, 113, 0.85);
+}
+.cm-diag-warn-line {
+  background-color: rgba(251, 191, 36, 0.12) !important;
+}
+
+/* NC Gコード & カスタムマクロB トークンハイライト */
+.nc-tok-g {
+  color: #4fc1ff;
+  font-weight: 600;
+}
+.nc-tok-m {
+  color: #c586c0;
+  font-weight: 600;
+}
+.nc-tok-axis-x {
+  color: #f87171;
+}
+.nc-tok-axis-y {
+  color: #4ade80;
+}
+.nc-tok-axis-z {
+  color: #60a5fa;
+}
+.nc-tok-ijk {
+  color: #fbbf24;
+}
+.nc-tok-param {
+  color: #9cdcfe;
+}
+.nc-tok-prog {
+  color: #dcdcaa;
+  font-weight: 600;
+}
+.nc-tok-comment {
+  color: #6a9955;
+  font-style: italic;
+}
+.nc-tok-macro-var {
+  color: #f472b6;
+  font-weight: 600;
+}
+.nc-tok-macro-kw {
+  color: #c084fc;
+  font-weight: 700;
+}
+
+/* ブレイクポイントガター */
+.cm-breakpoint-gutter {
+  width: 16px;
+  cursor: pointer;
+}
+.cm-breakpoint-gutter .cm-gutterElement {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 2px;
+}
+.cm-bp-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 9999px;
+  background-color: #ef4444;
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.75);
+}
