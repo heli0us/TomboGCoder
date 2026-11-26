@@ -453,4 +453,33 @@ M30
         assert!(res.compensated_segments.iter().any(|s| s.program_number == "O1"));
         assert!(res.compensated_segments.iter().any(|s| s.program_number == "O2"));
     }
+
+    #[test]
+    fn test_g52_local_coordinate_partial_axis_and_cancel() {
+        let nc = r#"
+G90 G54 G17 G21
+G52 X50. Y20.
+G00 X0. Y0. Z10.
+G52 Z-5.
+G01 X10. Y5. Z0. F300.
+G52 X0. Y0. Z0.
+G00 X0. Y0. Z10.
+"#;
+        let cfg = MachineConfig::default();
+        let res = simulator::simulate_nc(nc, &cfg, None);
+        let segs = &res.program_segments;
+        assert_eq!(segs.len(), 3);
+        // 1本目: G52 X50 Y20 下での (0, 0, 10) -> (50, 20, 10)
+        assert!((segs[0].end.x - 50.0).abs() < 1e-6);
+        assert!((segs[0].end.y - 20.0).abs() < 1e-6);
+        assert!((segs[0].end.z - 10.0).abs() < 1e-6);
+        // 2本目: G52 Z-5 で X=50, Y=20 が保持され、X10 Y5 Z0 -> (60, 25, -5)
+        assert!((segs[1].end.x - 60.0).abs() < 1e-6);
+        assert!((segs[1].end.y - 25.0).abs() < 1e-6);
+        assert!((segs[1].end.z - (-5.0)).abs() < 1e-6);
+        // 3本目: G52 X0 Y0 Z0 で解除後、(0, 0, 10)
+        assert!((segs[2].end.x - 0.0).abs() < 1e-6);
+        assert!((segs[2].end.y - 0.0).abs() < 1e-6);
+        assert!((segs[2].end.z - 10.0).abs() < 1e-6);
+    }
 }

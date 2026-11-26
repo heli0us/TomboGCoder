@@ -557,11 +557,20 @@ fn execute_block(
 
     // 3. G52 ローカル座標設定 / G92 座標系設定
     if is_g52 {
-        state.local_offset = Point3::new(
-            x_val.map(|v| v * scale).unwrap_or(0.0),
-            y_val.map(|v| v * scale).unwrap_or(0.0),
-            z_val.map(|v| v * scale).unwrap_or(0.0),
-        );
+        // FANUC仕様: 指定された軸のローカルオフセットのみ更新（省略軸は現在値を保持）。全軸省略の単独G52は全クリア。
+        if x_val.is_none() && y_val.is_none() && z_val.is_none() {
+            state.local_offset = Point3::zero();
+        } else {
+            if let Some(x) = x_val {
+                state.local_offset.x = x * scale;
+            }
+            if let Some(y) = y_val {
+                state.local_offset.y = y * scale;
+            }
+            if let Some(z) = z_val {
+                state.local_offset.z = z * scale;
+            }
+        }
         return;
     }
     if is_g92 {
