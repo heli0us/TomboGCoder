@@ -35,6 +35,18 @@ import {
 } from "./types/nc";
 
 const TOOL_PRESETS_STORAGE_KEY = "tombo_gcoder_tool_presets_v2";
+const PLAYBACK_SPEED_STORAGE_KEY = "tombo_gcoder_playback_speed_v1";
+
+function loadSavedPlaybackSpeed(): number {
+  try {
+    const raw = window.localStorage.getItem(PLAYBACK_SPEED_STORAGE_KEY);
+    if (!raw) return 30;
+    const val = Number(raw);
+    return Number.isFinite(val) && val > 0 ? val : 30;
+  } catch {
+    return 30;
+  }
+}
 
 function loadSavedToolPresets(): ToolPreset[] {
   try {
@@ -70,19 +82,29 @@ export function App() {
   const [autoBreak, setAutoBreak] = useState<AutoBreakConfig>(DEFAULT_AUTO_BREAK);
   const [breakReason, setBreakReason] = useState<string | null>(null);
 
-  // VS Code レイアウト（全ペインリサイズ対応）
+  // VS Code レイアウト（全ペイン開閉＆リサイズ対応）
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(true);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("filter");
   const [sidebarWidth, setSidebarWidth] = useState<number>(264);
+  const [editorOpen, setEditorOpen] = useState<boolean>(true);
   const [bottomTab, setBottomTab] = useState<BottomTab>("cycle");
   const [bottomCollapsed, setBottomCollapsed] = useState<boolean>(false);
   const [bottomHeight, setBottomHeight] = useState<number>(224);
   const [editorRatio, setEditorRatio] = useState<number>(0.34);
 
-  // トレース再生状態
+  // トレース再生状態（デフォルト 30x、変更値はローカル記憶）
   const [activeSegmentIndex, setActiveSegmentIndex] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
-  const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
+  const [playbackSpeed, setPlaybackSpeed] = useState<number>(() => loadSavedPlaybackSpeed());
+
+  const handleChangePlaybackSpeed = useCallback((speed: number) => {
+    setPlaybackSpeed(speed);
+    try {
+      window.localStorage.setItem(PLAYBACK_SPEED_STORAGE_KEY, String(speed));
+    } catch {
+      // ignore
+    }
+  }, []);
   const [cameraCommand, setCameraCommand] = useState<{
     preset: CameraPreset | "fit";
     seq: number;
@@ -90,6 +112,30 @@ export function App() {
 
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
   const dragModeRef = useRef<null | "sidebar" | "editor" | "bottom">(null);
+  // 全画面切替前のペイン状態を退避
+  const prevLayoutRef = useRef<{
+    sidebarOpen: boolean;
+    editorOpen: boolean;
+    bottomCollapsed: boolean;
+  }>({ sidebarOpen: true, editorOpen: true, bottomCollapsed: false });
+
+  const isViewportMaximized = !sidebarOpen && !editorOpen && bottomCollapsed;
+
+  const handleToggleMaximizeViewport = useCallback(() => {
+    if (!sidebarOpen && !editorOpen && bottomCollapsed) {
+      // 元に戻す
+      const prev = prevLayoutRef.current;
+      setSidebarOpen(prev.sidebarOpen);
+      setEditorOpen(prev.editorOpen);
+      setBottomCollapsed(prev.bottomCollapsed);
+    } else {
+      // 現在状態を退避して3D全画面化
+      prevLayoutRef.current = { sidebarOpen, editorOpen, bottomCollapsed };
+      setSidebarOpen(false);
+      setEditorOpen(false);
+      setBottomCollapsed(true);
+    }
+  }, [sidebarOpen, editorOpen, bottomCollapsed]);
 
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
@@ -447,6 +493,16 @@ export function App() {
         setSidebarOpen((v) => !v);
         return;
       }
+      if (mod && e.key.toLowerCase() === "e") {
+        e.preventDefault();
+        setEditorOpen((v) => !v);
+        return;
+      }
+      if (mod && e.key.toLowerCase() === "j") {
+        e.preventDefault();
+        setBottomCollapsed((v) => !v);
+        return;
+      }
       const target = e.target as HTMLElement | null;
       if (
         target &&
@@ -537,10 +593,16 @@ export function App() {
         isParsing={isParsing}
         watchExternal={watchExternal}
         profileName={machineConfig.profileName}
+        sidebarOpen={sidebarOpen}
+        editorOpen={editorOpen}
+        bottomOpen={!bottomCollapsed}
         onOpenFile={handleOpenFile}
         onSaveFile={handleSaveFile}
         onLoadSample={handleLoadSample}
         onToggleWatchExternal={() => setWatchExternal((v) => !v)}
+        onToggleSidebar={() => setSidebarOpen((v) => !v)}
+        onToggleEditor={() => setEditorOpen((v) => !v)}
+        onToggleBottom={() => setBottomCollapsed((v) => !v)}
       />
 
       {parseError && (
@@ -638,45 +700,49 @@ export function App() {
         {/* 右メインワークスペース */}
         <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
           <div ref={splitContainerRef} className="flex-1 flex min-h-0 overflow-hidden">
-            {/* 左ペイン：NCコードエディタ */}
-            <div
-              style={{ width: `${editorRatio * 100}%` }}
-              className="h-full flex flex-col min-w-[200px] border-r border-[#2b2b2b]"
-            >
-              <div className="h-8 bg-[#181818] border-b border-[#2b2b2b] px-3 flex items-center justify-between text-[11.5px] shrink-0">
-                <span className="font-mono text-[#e2e8f0] truncate">{fileName}</span>
-                <span className="text-[10.5px] text-[#787878] font-mono">
-                  {parseResult?.lineCount ?? 0} 行
-                  {parseResult && parseResult.expandedBlockCount > parseResult.lineCount
-                    ? ` → 展開 ${parseResult.expandedBlockCount}`
-                    : ""}
-                </span>
-              </div>
-              <div className="flex-1 min-h-0">
-                <NcEditor
-                  value={source}
-                  onChange={(val) => {
-                    setSource(val);
-                    setIsDirty(true);
-                  }}
-                  activeLine={activeSegment?.lineNumber ?? null}
-                  diagnostics={effectiveResult?.diagnostics ?? []}
-                  breakpoints={breakpoints}
-                  onToggleBreakpoint={handleToggleBreakpoint}
-                  onLineClick={jumpToLine}
-                />
-              </div>
-            </div>
+            {/* 左ペイン：NCコードエディタ（ワンクリックで折りたたみ可能） */}
+            {editorOpen && (
+              <>
+                <div
+                  style={{ width: `${editorRatio * 100}%` }}
+                  className="h-full flex flex-col min-w-[200px] border-r border-[#2b2b2b]"
+                >
+                  <div className="h-8 bg-[#181818] border-b border-[#2b2b2b] px-3 flex items-center justify-between text-[11.5px] shrink-0">
+                    <span className="font-mono text-[#e2e8f0] truncate">{fileName}</span>
+                    <span className="text-[10.5px] text-[#787878] font-mono">
+                      {parseResult?.lineCount ?? 0} 行
+                      {parseResult && parseResult.expandedBlockCount > parseResult.lineCount
+                        ? ` → 展開 ${parseResult.expandedBlockCount}`
+                        : ""}
+                    </span>
+                  </div>
+                  <div className="flex-1 min-h-0">
+                    <NcEditor
+                      value={source}
+                      onChange={(val) => {
+                        setSource(val);
+                        setIsDirty(true);
+                      }}
+                      activeLine={activeSegment?.lineNumber ?? null}
+                      diagnostics={effectiveResult?.diagnostics ?? []}
+                      breakpoints={breakpoints}
+                      onToggleBreakpoint={handleToggleBreakpoint}
+                      onLineClick={jumpToLine}
+                    />
+                  </div>
+                </div>
 
-            {/* エディタ幅リサイズハンドル */}
-            <div
-              onMouseDown={() => {
-                dragModeRef.current = "editor";
-                document.body.style.cursor = "col-resize";
-              }}
-              className="w-1 bg-transparent hover:bg-[#0078d4] cursor-col-resize transition-colors shrink-0 -ml-0.5 z-10"
-              title="ドラッグしてエディタ幅を調整"
-            />
+                {/* エディタ幅リサイズハンドル */}
+                <div
+                  onMouseDown={() => {
+                    dragModeRef.current = "editor";
+                    document.body.style.cursor = "col-resize";
+                  }}
+                  className="w-1 bg-transparent hover:bg-[#0078d4] cursor-col-resize transition-colors shrink-0 -ml-0.5 z-10"
+                  title="ドラッグしてエディタ幅を調整"
+                />
+              </>
+            )}
 
             {/* 右ペイン：3D/2D ツールパスビューポート */}
             <div className="flex-1 h-full min-w-[280px]">
@@ -707,7 +773,7 @@ export function App() {
                 onTogglePlay={handleTogglePlay}
                 onStopPlay={() => setIsPlaying(false)}
                 playbackSpeed={playbackSpeed}
-                onChangePlaybackSpeed={setPlaybackSpeed}
+                onChangePlaybackSpeed={handleChangePlaybackSpeed}
                 breakpoints={breakpoints}
                 autoBreak={autoBreak}
                 breakReason={breakReason}
@@ -716,6 +782,8 @@ export function App() {
                   setBreakReason(reason);
                   setActiveSegmentIndex(idx);
                 }}
+                isViewportMaximized={isViewportMaximized}
+                onToggleMaximizeViewport={handleToggleMaximizeViewport}
                 cameraCommand={cameraCommand}
               />
             </div>

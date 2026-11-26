@@ -7,7 +7,7 @@ import {
   Pause,
   Play,
 } from "lucide-react";
-import { type PathSegment, formatDuration, motionTypeLabel } from "../../types/nc";
+import { type PathSegment, formatDuration } from "../../types/nc";
 
 interface TraceBarProps {
   totalSteps: number;
@@ -34,9 +34,6 @@ export const TraceBar: React.FC<TraceBarProps> = ({
   onTogglePlay,
   onChangePlaybackSpeed,
 }) => {
-  const isRapid =
-    currentSegment?.motionType === "rapid" || currentSegment?.motionType === "canned_rapid";
-
   return (
     <div className="absolute bottom-3 left-3 right-3 z-20 bg-[#1f2126]/95 border border-[#32363f] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md flex flex-col gap-1.5">
       {breakReason && (
@@ -125,19 +122,6 @@ export const TraceBar: React.FC<TraceBarProps> = ({
           disabled={totalSteps === 0}
           className="flex-1 accent-[#38bdf8] h-1.5 cursor-pointer"
         />
-
-        {/* 移動種別バッジ */}
-        {currentSegment && (
-          <span
-            className={`hidden xl:inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono border ${
-              isRapid
-                ? "bg-[#f87171]/15 border-[#f87171]/40 text-[#fca5a5]"
-                : "bg-[#38bdf8]/15 border-[#38bdf8]/40 text-[#7dd3fc]"
-            }`}
-          >
-            {motionTypeLabel(currentSegment.motionType)}
-          </span>
-        )}
 
         {/* ステップ & リアルタイム経過時間 */}
         <div className="text-[11px] font-mono text-[#cbd5e1] whitespace-nowrap min-w-[148px] text-right">

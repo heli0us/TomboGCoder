@@ -27,6 +27,7 @@ import {
 } from "../utils/toolpathGeometry";
 import {
   type ActiveSnapHover,
+  type DroRefs,
   type HoverInfo,
   type NavMode,
   ViewportOverlays,
@@ -52,6 +53,8 @@ interface ToolpathViewportProps {
   autoBreak: AutoBreakConfig;
   breakReason: string | null;
   onBreakHit: (idx: number, reason: string) => void;
+  isViewportMaximized: boolean;
+  onToggleMaximizeViewport: () => void;
   cameraCommand: { preset: CameraPreset | "fit"; seq: number } | null;
 }
 
@@ -84,6 +87,8 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
   autoBreak,
   breakReason,
   onBreakHit,
+  isViewportMaximized,
+  onToggleMaximizeViewport,
   cameraCommand,
 }) => {
   const mountRef = useRef<HTMLDivElement | null>(null);
@@ -104,6 +109,27 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
   const measureGroupRef = useRef<THREE.Group | null>(null);
   const pathHandlesRef = useRef<PathBufferHandles | null>(null);
   const liveTimeTextRef = useRef<HTMLSpanElement | null>(null);
+
+  // 実機CNC風 DRO の60fps直接更新用 DOM Refs（React再レンダリング負荷ゼロ）
+  const droXRef = useRef<HTMLSpanElement | null>(null);
+  const droYRef = useRef<HTMLSpanElement | null>(null);
+  const droZRef = useRef<HTMLSpanElement | null>(null);
+  const droFeedRef = useRef<HTMLSpanElement | null>(null);
+  const droSpindleRef = useRef<HTMLSpanElement | null>(null);
+  const droToolRef = useRef<HTMLSpanElement | null>(null);
+  const droMotionRef = useRef<HTMLSpanElement | null>(null);
+  const droRefs = useMemo<DroRefs>(
+    () => ({
+      x: droXRef,
+      y: droYRef,
+      z: droZRef,
+      feed: droFeedRef,
+      spindle: droSpindleRef,
+      tool: droToolRef,
+      motion: droMotionRef,
+    }),
+    [],
+  );
 
   const [viewportSize, setViewportSize] = useState({ width: 800, height: 600 });
   const [hoverInfo, setHoverInfo] = useState<HoverInfo | null>(null);
@@ -222,6 +248,25 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     }
 
     const { pos, partial } = samplePolylineAt(seg.points, progress);
+
+    // 実機CNC風 DRO を 60fps リアルタイム更新
+    if (droXRef.current) droXRef.current.textContent = pos.x.toFixed(3);
+    if (droYRef.current) droYRef.current.textContent = pos.y.toFixed(3);
+    if (droZRef.current) droZRef.current.textContent = pos.z.toFixed(3);
+    if (droFeedRef.current) droFeedRef.current.textContent = `F${seg.feedRate.toFixed(0)}`;
+    if (droSpindleRef.current) {
+      droSpindleRef.current.textContent = `S${seg.spindleSpeed.toFixed(0)}`;
+    }
+    if (droToolRef.current) {
+      droToolRef.current.textContent = `T${String(seg.toolNumber).padStart(2, "0")}`;
+    }
+    if (droMotionRef.current) {
+      droMotionRef.current.textContent =
+        seg.modalState.compMode !== "Off"
+          ? `${seg.modalState.motionCode} ${seg.modalState.compMode === "Left" ? "G41" : "G42"}`
+          : seg.modalState.motionCode;
+    }
+
     if (tipLine) {
       if (partial.length >= 2) {
         tipLine.geometry.setFromPoints(partial);
@@ -286,10 +331,24 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     const dist = span * 1.45;
 
     controls.target.set(cx, cy, cz);
-    if (preset === "top") camera.position.set(cx, cy - 0.001, cz + dist);
-    else if (preset === "front") camera.position.set(cx, cy - dist, cz);
-    else if (preset === "right") camera.position.set(cx + dist, cy, cz);
-    else camera.position.set(cx + dist * 0.65, cy - dist * 0.78, cz + dist * 0.65);
+    if (preset === "top") {
+      camera.position.set(cx, cy - 0.001, cz + dist);
+    } else if (preset === "front") {
+      camera.position.set(cx, cy - dist, cz);
+    } else if (preset === "right") {
+      camera.position.set(cx + dist, cy, cz);
+    } else if (preset === "fit") {
+      // 現在のカメラ角度を維持したまま全体が収まる距離へフィット
+      const curDir = camera.position.clone().sub(controls.target);
+      if (curDir.lengthSq() < 1e-4) {
+        camera.position.set(cx + dist * 0.65, cy - dist * 0.78, cz + dist * 0.65);
+      } else {
+        curDir.normalize().multiplyScalar(dist);
+        camera.position.set(cx + curDir.x, cy + curDir.y, cz + curDir.z);
+      }
+    } else {
+      camera.position.set(cx + dist * 0.65, cy - dist * 0.78, cz + dist * 0.65);
+    }
 
     camera.near = Math.max(0.1, dist * 0.001);
     camera.far = Math.max(5000, dist * 20);
@@ -908,6 +967,56 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     endDot.renderOrder = 16;
 
     hg.add(startDot, endDot);
+
+    // 円弧補間 (G02/G03) の場合は円の中心マーカー（クロス＋球）と始終点への半径ガイド破線を表示
+    if (seg.arcCenter) {
+      const c = seg.arcCenter;
+      const cVec = new THREE.Vector3(c.x, c.y, c.z);
+
+      const centerDot = new THREE.Mesh(
+        new THREE.SphereGeometry(dotR * 1.2, 14, 14),
+        new THREE.MeshBasicMaterial({ color: 0xfacc15, depthTest: false }),
+      );
+      centerDot.position.copy(cVec);
+      centerDot.renderOrder = 17;
+
+      // 中心十字クロス
+      const crossSize = Math.max(dotR * 3.2, 2.0);
+      const crossPts = [
+        new THREE.Vector3(c.x - crossSize, c.y, c.z),
+        new THREE.Vector3(c.x + crossSize, c.y, c.z),
+        new THREE.Vector3(c.x, c.y - crossSize, c.z),
+        new THREE.Vector3(c.x, c.y + crossSize, c.z),
+      ];
+      const crossLines = new THREE.LineSegments(
+        new THREE.BufferGeometry().setFromPoints(crossPts),
+        new THREE.LineBasicMaterial({ color: 0xfacc15, depthTest: false }),
+      );
+      crossLines.renderOrder = 17;
+
+      // 中心→始点 / 中心→終点 の半径ガイド破線
+      const guidePts = [
+        cVec,
+        new THREE.Vector3(seg.start.x, seg.start.y, seg.start.z),
+        cVec,
+        new THREE.Vector3(seg.end.x, seg.end.y, seg.end.z),
+      ];
+      const guideLines = new THREE.LineSegments(
+        new THREE.BufferGeometry().setFromPoints(guidePts),
+        new THREE.LineDashedMaterial({
+          color: 0xfde047,
+          dashSize: Math.max(1.5, dotR * 2),
+          gapSize: Math.max(1.2, dotR * 1.6),
+          transparent: true,
+          opacity: 0.72,
+          depthTest: false,
+        }),
+      );
+      guideLines.computeLineDistances();
+      guideLines.renderOrder = 14;
+
+      hg.add(centerDot, crossLines, guideLines);
+    }
   }, [hoverInfo?.segment, boundingBox]);
 
   // 5. スナップ計測3Dオーバーレイ
@@ -1186,6 +1295,9 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
         snapHover={snapHover}
         hoverInfo={hoverInfo}
         zoomBox={zoomBox}
+        droRefs={droRefs}
+        isViewportMaximized={isViewportMaximized}
+        onToggleMaximizeViewport={onToggleMaximizeViewport}
         onApplyCameraPreset={applyCameraPreset}
       />
 

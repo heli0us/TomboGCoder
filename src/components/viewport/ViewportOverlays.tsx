@@ -1,9 +1,13 @@
-import React from "react";
+import React, { useState } from "react";
 import {
+  Crosshair,
   Eye,
+  Focus,
   Grid2x2,
   Hand,
+  HelpCircle,
   Maximize2,
+  Minimize2,
   PaintBucket,
   Rotate3d,
   Ruler,
@@ -53,6 +57,16 @@ interface MeasurementStats {
   angleDeg: number;
 }
 
+export interface DroRefs {
+  x: React.RefObject<HTMLSpanElement | null>;
+  y: React.RefObject<HTMLSpanElement | null>;
+  z: React.RefObject<HTMLSpanElement | null>;
+  feed: React.RefObject<HTMLSpanElement | null>;
+  spindle: React.RefObject<HTMLSpanElement | null>;
+  tool: React.RefObject<HTMLSpanElement | null>;
+  motion: React.RefObject<HTMLSpanElement | null>;
+}
+
 interface ViewportOverlaysProps {
   containerWidth: number;
   containerHeight: number;
@@ -68,6 +82,9 @@ interface ViewportOverlaysProps {
   snapHover: ActiveSnapHover | null;
   hoverInfo: HoverInfo | null;
   zoomBox: ZoomBox | null;
+  droRefs: DroRefs;
+  isViewportMaximized: boolean;
+  onToggleMaximizeViewport: () => void;
   onApplyCameraPreset: (preset: CameraPreset | "fit") => void;
 }
 
@@ -86,8 +103,14 @@ export const ViewportOverlays: React.FC<ViewportOverlaysProps> = ({
   snapHover,
   hoverInfo,
   zoomBox,
+  droRefs,
+  isViewportMaximized,
+  onToggleMaximizeViewport,
   onApplyCameraPreset,
 }) => {
+  const [showDro, setShowDro] = useState(true);
+  const [helpOpen, setHelpOpen] = useState(false);
+
   return (
     <>
       {/* 窓ズーム選択矩形 */}
@@ -252,9 +275,37 @@ export const ViewportOverlays: React.FC<ViewportOverlaysProps> = ({
           <button
             onClick={() => onApplyCameraPreset("fit")}
             className="p-1 rounded hover:bg-[#2f333c] text-[#cccccc] hover:text-white"
-            title="全体フィット (F / 中Wクリック)"
+            title="現在の視点方向のまま全体フィット (F / 中Wクリック)"
           >
-            <Maximize2 className="w-3.5 h-3.5" />
+            <Focus className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={onToggleMaximizeViewport}
+            className={`p-1 rounded transition-colors ${
+              isViewportMaximized
+                ? "bg-[#0078d4] text-white"
+                : "text-[#cccccc] hover:bg-[#2f333c] hover:text-white"
+            }`}
+            title={isViewportMaximized ? "元のレイアウトへ戻す" : "3Dビューを全画面表示"}
+          >
+            {isViewportMaximized ? (
+              <Minimize2 className="w-3.5 h-3.5" />
+            ) : (
+              <Maximize2 className="w-3.5 h-3.5" />
+            )}
+          </button>
+          <div className="w-px h-3.5 bg-[#353944] mx-0.5" />
+          <button
+            onClick={() => setShowDro((v) => !v)}
+            className={`px-1.5 py-0.5 rounded flex items-center gap-1 transition-colors font-mono ${
+              showDro
+                ? "bg-[#38bdf8]/20 text-[#7dd3fc]"
+                : "text-[#8e95a2] hover:text-white hover:bg-[#2f333c]"
+            }`}
+            title="実機CNC風ライブ座標 DRO の表示切替"
+          >
+            <Crosshair className="w-3 h-3" />
+            DRO
           </button>
         </div>
       </div>
@@ -337,12 +388,12 @@ export const ViewportOverlays: React.FC<ViewportOverlaysProps> = ({
       {/* マウスホバー・ナビゲーション ツールチップ（画面端クランプ付き） */}
       {!measureMode && hoverInfo && (
         <div
-          className="pointer-events-none absolute z-30 w-72 bg-[#1c1d21]/95 border border-[#38bdf8]/75 rounded-md shadow-2xl p-2.5 text-[11px] font-mono text-[#e2e8f0] backdrop-blur-md"
+          className="pointer-events-none absolute z-30 w-80 bg-[#1c1d21]/95 border border-[#38bdf8]/75 rounded-md shadow-2xl p-2.5 text-[11px] font-mono text-[#e2e8f0] backdrop-blur-md"
           style={{
-            left: Math.min(hoverInfo.x + 16, Math.max(12, containerWidth - 300)),
+            left: Math.min(hoverInfo.x + 16, Math.max(12, containerWidth - 332)),
             top: Math.min(
               Math.max(48, hoverInfo.y - 16),
-              Math.max(48, containerHeight - 235),
+              Math.max(48, containerHeight - 280),
             ),
           }}
         >
@@ -386,16 +437,116 @@ export const ViewportOverlays: React.FC<ViewportOverlaysProps> = ({
             {hoverInfo.segment.arcRadius !== null && (
               <>
                 <span className="text-[#94a3b8]">円弧半径 R:</span>
-                <span className="text-[#4ade80]">{hoverInfo.segment.arcRadius.toFixed(3)} mm</span>
+                <span className="text-[#4ade80] font-semibold">
+                  {hoverInfo.segment.arcRadius.toFixed(3)} mm
+                </span>
+              </>
+            )}
+            {hoverInfo.segment.arcCenter && (
+              <>
+                <span className="text-[#94a3b8]">円中心 (XYZ):</span>
+                <span className="text-[#facc15]">
+                  {hoverInfo.segment.arcCenter.x.toFixed(3)},{" "}
+                  {hoverInfo.segment.arcCenter.y.toFixed(3)},{" "}
+                  {hoverInfo.segment.arcCenter.z.toFixed(3)}
+                </span>
+                <span className="text-[#94a3b8]">中心増分 (IJK):</span>
+                <span className="text-[#fde047]">
+                  I{(hoverInfo.segment.arcCenter.x - hoverInfo.segment.start.x).toFixed(3)} J
+                  {(hoverInfo.segment.arcCenter.y - hoverInfo.segment.start.y).toFixed(3)}
+                </span>
               </>
             )}
           </div>
         </div>
       )}
 
-      {/* 右下（トレースバー直上）：AutoCAD風 操作ガイド */}
-      <div className="pointer-events-none absolute bottom-[62px] right-3 z-20 bg-[#181a1f]/80 border border-[#2f333c] rounded px-2 py-0.5 text-[10px] text-[#8e95a2] backdrop-blur-sm">
-        ホイール: カーソルズーム ｜ 中/左ドラッグ: 移動 ｜ Shift+中/右ドラッグ: 3D回転 ｜ 中Wクリック: 全体
+      {/* 左下（トレースバー直上）：実機CNC風 60fps ライブ座標 DRO */}
+      <div
+        className={`pointer-events-auto absolute bottom-[62px] left-3 z-20 w-48 bg-[#14161b]/88 border border-[#2f3440] rounded-md px-2.5 py-2 shadow-xl backdrop-blur-md font-mono transition-opacity ${
+          showDro ? "opacity-100" : "opacity-0 pointer-events-none"
+        }`}
+      >
+        <div className="flex items-center justify-between border-b border-[#262a33] pb-1 mb-1.5 text-[10px]">
+          <span className="text-[#8e95a2] tracking-wider font-sans font-semibold">
+            MACHINE DRO
+          </span>
+          <span
+            ref={droRefs.motion}
+            className="px-1.5 py-0 rounded bg-[#094771]/70 text-[#7dd3fc] text-[10px]"
+          >
+            G00
+          </span>
+        </div>
+
+        <div className="space-y-0.5 text-[13px] leading-tight tracking-tight">
+          <div className="flex items-center justify-between">
+            <span className="text-[#f87171] font-bold">X</span>
+            <span ref={droRefs.x} className="text-[#f1f5f9] tabular-nums">
+              0.000
+            </span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-[#4ade80] font-bold">Y</span>
+            <span ref={droRefs.y} className="text-[#f1f5f9] tabular-nums">
+              0.000
+            </span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-[#60a5fa] font-bold">Z</span>
+            <span ref={droRefs.z} className="text-[#f1f5f9] tabular-nums">
+              0.000
+            </span>
+          </div>
+        </div>
+
+        <div className="mt-1.5 pt-1 border-t border-[#262a33] flex items-center justify-between text-[10.5px] text-[#94a3b8]">
+          <span ref={droRefs.tool} className="text-[#fbbf24] font-semibold">
+            T00
+          </span>
+          <span ref={droRefs.feed}>F0</span>
+          <span ref={droRefs.spindle}>S0</span>
+        </div>
+      </div>
+
+      {/* 右下（トレースバー直上）：ミニマル ? 操作ヘルプボタン & ポップオーバー */}
+      <div
+        className="pointer-events-auto absolute bottom-[62px] right-3 z-20"
+        onMouseEnter={() => setHelpOpen(true)}
+        onMouseLeave={() => setHelpOpen(false)}
+      >
+        {helpOpen && (
+          <div className="absolute bottom-8 right-0 w-72 bg-[#1c1d21]/95 border border-[#32363f] rounded-md shadow-2xl p-2.5 text-[11px] backdrop-blur-md">
+            <div className="text-[10.5px] font-semibold text-[#9cdcfe] uppercase tracking-wider border-b border-[#2c2f38] pb-1 mb-1.5">
+              ビュー操作 (AutoCAD風) & ショートカット
+            </div>
+            <div className="grid grid-cols-[118px_1fr] gap-y-1 gap-x-2 text-[10.5px]">
+              <span className="font-mono text-[#cbd5e1]">ホイール上下</span>
+              <span className="text-[#94a3b8]">カーソル位置へズーム</span>
+              <span className="font-mono text-[#cbd5e1]">中 / 左ドラッグ</span>
+              <span className="text-[#94a3b8]">平行移動 (パン)</span>
+              <span className="font-mono text-[#cbd5e1]">Shift+中 / 右</span>
+              <span className="text-[#94a3b8]">3D オービット回転</span>
+              <span className="font-mono text-[#cbd5e1]">中Wクリック / F</span>
+              <span className="text-[#94a3b8]">全体フィット表示</span>
+              <span className="font-mono text-[#cbd5e1]">Space / ← →</span>
+              <span className="text-[#94a3b8]">トレース再生 / 1ステップ</span>
+              <span className="font-mono text-[#cbd5e1]">Cmd/Ctrl + B/E/J</span>
+              <span className="text-[#94a3b8]">サイド / エディタ / 下部開閉</span>
+            </div>
+          </div>
+        )}
+        <button
+          onClick={() => setHelpOpen((v) => !v)}
+          className={`w-7 h-7 rounded-full border flex items-center justify-center transition-colors shadow-md backdrop-blur-sm ${
+            helpOpen
+              ? "bg-[#0078d4] border-[#38bdf8] text-white"
+              : "bg-[#1f2126]/90 border-[#32363f] text-[#8e95a2] hover:text-white hover:border-[#4b5263]"
+          }`}
+          title="操作ガイド・ショートカットを表示"
+        >
+          <HelpCircle className="w-3.5 h-3.5" />
+        </button>
       </div>
     </>
   );
