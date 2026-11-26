@@ -13,8 +13,15 @@ import {
   keymap,
   lineNumbers,
 } from "@codemirror/view";
-import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
-import { search, searchKeymap } from "@codemirror/search";
+import {
+  defaultKeymap,
+  history,
+  historyKeymap,
+  redo,
+  selectAll,
+  undo,
+} from "@codemirror/commands";
+import { openSearchPanel, search, searchKeymap } from "@codemirror/search";
 import type { Diagnostic } from "../types/nc";
 
 export interface EditorSelectionInfo {
@@ -29,6 +36,10 @@ export interface NcEditorHandle {
   getSelectionInfo: () => EditorSelectionInfo;
   insertAtSelection: (text: string) => boolean;
   appendToEnd: (text: string) => boolean;
+  undo: () => void;
+  redo: () => void;
+  openSearch: () => void;
+  selectAll: () => void;
 }
 
 interface NcEditorProps {
@@ -322,6 +333,30 @@ export const NcEditor = forwardRef<NcEditorHandle, NcEditorProps>(
           });
           view.focus();
           return true;
+        },
+        undo: () => {
+          const view = viewRef.current;
+          if (!view) return;
+          undo(view);
+          view.focus();
+        },
+        redo: () => {
+          const view = viewRef.current;
+          if (!view) return;
+          redo(view);
+          view.focus();
+        },
+        openSearch: () => {
+          const view = viewRef.current;
+          if (!view) return;
+          openSearchPanel(view);
+          view.focus();
+        },
+        selectAll: () => {
+          const view = viewRef.current;
+          if (!view) return;
+          selectAll(view);
+          view.focus();
         },
       }),
       [],

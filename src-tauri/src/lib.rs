@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 use tauri::{AppHandle, Emitter, State};
+#[cfg(not(target_os = "macos"))]
+use tauri::Manager;
 
 /// 外部エディタ連動のファイル監視状態
 #[derive(Default)]
@@ -284,6 +286,16 @@ pub fn run() {
     tauri::Builder::default()
         .manage(WatchState::default())
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            // Windows / Linux では OS 標準タイトルバーを外してカスタム一体型タイトルバーにする
+            // （macOS は tauri.conf.json の titleBarStyle: Overlay でトラフィックライト付き一体型）
+            #[cfg(not(target_os = "macos"))]
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_decorations(false);
+            }
+            let _ = app;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             parse_nc_program,
             read_text_file,

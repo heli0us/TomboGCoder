@@ -12,6 +12,7 @@ import {
   DropActionModal,
   UnsavedChangesModal,
 } from "./components/FileActionModals";
+import { HelpModal } from "./components/HelpModals";
 import {
   exportJsonFile,
   exportReportFile,
@@ -270,7 +271,28 @@ function parseImportedMachineProfiles(rawText: string): MachineProfile[] {
   return result;
 }
 
+const NEW_NC_TEMPLATE = `%
+O0001 (NEW PROGRAM)
+G90 G40 G49 G80 G17 G21
+T01 M06
+G54 G00 X0.0 Y0.0
+G43 Z50.0 H01 S5000 M03
+G00 Z5.0
+G01 Z-2.0 F200.0
+G01 X50.0 Y0.0 F500.0
+G00 Z50.0
+M05
+G91 G28 Z0.0
+G90
+M30
+%`;
+
 export function App() {
+  const isMac = useMemo(
+    () => typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/i.test(navigator.userAgent),
+    [],
+  );
+  const [helpModal, setHelpModal] = useState<null | "shortcuts" | "about">(null);
   const [source, setSource] = useState<string>("");
   const [filePath, setFilePath] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string>("sample_plate.nc");
@@ -669,6 +691,56 @@ export function App() {
     },
     [pushRecentFile],
   );
+
+  const handleNewFile = useCallback(() => {
+    confirmIfDirty("新規NCプログラムを作成", () => {
+      setIsPlaying(false);
+      setBreakReason(null);
+      setBreakpoints([]);
+      setDisplayOptions((prev) => ({
+        ...prev,
+        hiddenPrograms: [],
+        hiddenTools: [],
+        hiddenDNumbers: [],
+      }));
+      setSource(NEW_NC_TEMPLATE);
+      setFilePath(null);
+      setFileName("untitled.nc");
+      setEncoding("UTF-8");
+      setIsDirty(false);
+      setActiveSegmentIndex(0);
+      setEditorOpen(true);
+      pendingAutoFitRef.current = true;
+      showToast("新規NCプログラムを作成しました");
+    });
+  }, [confirmIfDirty, showToast]);
+
+  const handleInsertExternalFile = useCallback(async () => {
+    if (!isTauriRuntime()) return;
+    try {
+      const file = await openNcFileDialog();
+      if (!file) return;
+      const text = prepareInsertNcCode(file.content, true);
+      if (!editorOpen) {
+        setEditorOpen(true);
+      }
+      const inserted = ncEditorRef.current?.insertAtSelection(text);
+      if (!inserted) {
+        setSource((prev) => (prev ? `${prev}\n${text}` : text));
+        setIsDirty(true);
+      }
+      showToast(`カーソル位置にコードを挿入しました: ${file.fileName} (Ctrl+Z で戻せます)`);
+    } catch (err) {
+      setParseError(`外部NCファイル挿入エラー: ${String(err)}`);
+    }
+  }, [editorOpen, showToast]);
+
+  const handleQuitApp = useCallback(() => {
+    if (!isTauriRuntime()) return;
+    getCurrentWindow()
+      .close()
+      .catch(() => {});
+  }, []);
 
   const handleOpenFile = useCallback(() => {
     if (!isTauriRuntime()) return;
@@ -1125,6 +1197,10 @@ export function App() {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        if (helpModal) {
+          setHelpModal(null);
+          return;
+        }
         if (unsavedPrompt) {
           setUnsavedPrompt(null);
           return;
@@ -1135,6 +1211,11 @@ export function App() {
         }
       }
       const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        handleNewFile();
+        return;
+      }
       if (mod && e.key.toLowerCase() === "o") {
         e.preventDefault();
         handleOpenFile();
@@ -1195,11 +1276,13 @@ export function App() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
+    handleNewFile,
     handleOpenFile,
     handleSaveFile,
     handleSaveAsFile,
     handleTogglePlay,
     effectiveResult,
+    helpModal,
     unsavedPrompt,
     pendingDrop,
   ]);
@@ -1255,6 +1338,7 @@ export function App() {
   return (
     <div className="h-screen w-screen flex flex-col bg-[#1f1f1f] text-[#cccccc] overflow-hidden">
       <TopBar
+        isMac={isMac}
         fileName={fileName}
         filePath={filePath}
         encoding={encoding}
@@ -1264,9 +1348,14 @@ export function App() {
         recentFiles={recentFiles}
         machineProfiles={machineProfiles}
         activeMachineProfile={activeMachineProfile}
+        displayOptions={displayOptions}
+        isPlaying={isPlaying}
+        isViewportMaximized={isViewportMaximized}
+        breakpointCount={breakpoints.length}
         sidebarOpen={sidebarOpen}
         editorOpen={editorOpen}
         bottomOpen={!bottomCollapsed}
+        onNewFile={handleNewFile}
         onOpenFile={handleOpenFile}
         onOpenRecentFile={handleOpenRecentFile}
         onClearRecentFiles={handleClearRecentFiles}
@@ -1275,14 +1364,62 @@ export function App() {
         onToggleEncoding={handleToggleEncoding}
         onLoadSample={handleLoadSample}
         onToggleWatchExternal={() => setWatchExternal((v) => !v)}
+        onExportCsv={handleExportCsv}
+        onExportHtml={handleExportHtml}
+        onQuitApp={handleQuitApp}
+        onEditUndo={() => {
+          setEditorOpen(true);
+          ncEditorRef.current?.undo();
+        }}
+        onEditRedo={() => {
+          setEditorOpen(true);
+          ncEditorRef.current?.redo();
+        }}
+        onEditSearch={() => {
+          setEditorOpen(true);
+          window.setTimeout(() => ncEditorRef.current?.openSearch(), 0);
+        }}
+        onEditSelectAll={() => {
+          setEditorOpen(true);
+          ncEditorRef.current?.selectAll();
+        }}
+        onInsertExternalFile={handleInsertExternalFile}
+        onToggleSidebar={() => setSidebarOpen((v) => !v)}
+        onToggleEditor={() => setEditorOpen((v) => !v)}
+        onToggleBottom={() => setBottomCollapsed((v) => !v)}
+        onToggleMaximizeViewport={handleToggleMaximizeViewport}
+        onCameraPreset={(preset) =>
+          setCameraCommand((c) => ({ preset, seq: (c?.seq ?? 0) + 1 }))
+        }
+        onUpdateDisplayOptions={(patch) =>
+          setDisplayOptions((prev) => ({ ...prev, ...patch }))
+        }
         onSelectMachineProfile={handleSelectMachineProfile}
         onOpenMachineSettings={() => {
           setSidebarTab("machine");
           setSidebarOpen(true);
         }}
-        onToggleSidebar={() => setSidebarOpen((v) => !v)}
-        onToggleEditor={() => setEditorOpen((v) => !v)}
-        onToggleBottom={() => setBottomCollapsed((v) => !v)}
+        onExportActiveMachineProfile={handleExportActiveMachineProfile}
+        onExportAllMachineProfiles={handleExportAllMachineProfiles}
+        onImportMachineProfiles={handleImportMachineProfiles}
+        onTogglePlay={handleTogglePlay}
+        onRewindSim={() => {
+          setIsPlaying(false);
+          setBreakReason(null);
+          setActiveSegmentIndex(0);
+        }}
+        onStepSim={(delta) => {
+          setIsPlaying(false);
+          setBreakReason(null);
+          const maxIdx = Math.max(0, (effectiveResult?.compensatedSegments.length ?? 1) - 1);
+          setActiveSegmentIndex((prev) => Math.max(0, Math.min(maxIdx, prev + delta)));
+        }}
+        onClearBreakpoints={() => setBreakpoints([])}
+        onOpenBottomTab={(tab) => {
+          setBottomTab(tab);
+          setBottomCollapsed(false);
+        }}
+        onOpenHelpModal={(mode) => setHelpModal(mode)}
       />
 
       {parseError && (
@@ -1547,6 +1684,9 @@ export function App() {
           }}
           onCancel={() => setUnsavedPrompt(null)}
         />
+      )}
+      {helpModal && (
+        <HelpModal mode={helpModal} isMac={isMac} onClose={() => setHelpModal(null)} />
       )}
     </div>
   );
