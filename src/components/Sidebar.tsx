@@ -3,15 +3,14 @@ import type {
   AutoBreakConfig,
   DisplayOptions,
   MachineConfig,
+  MachineProfile,
   ParseResult,
-  ToolPreset,
 } from "../types/nc";
 import { FilterPanel } from "./sidebar/FilterPanel";
-import { ToolMagazinePanel } from "./sidebar/ToolMagazinePanel";
+import { MachineProfilePanel } from "./sidebar/MachineProfilePanel";
 import { DebugPanel } from "./sidebar/DebugPanel";
-import { MachinePanel } from "./sidebar/MachinePanel";
 
-export type SidebarTab = "filter" | "tools" | "debug" | "machine";
+export type SidebarTab = "filter" | "machine" | "debug";
 
 interface SidebarProps {
   activeTab: SidebarTab;
@@ -19,13 +18,16 @@ interface SidebarProps {
   displayOptions: DisplayOptions;
   onUpdateDisplayOptions: (patch: Partial<DisplayOptions>) => void;
   onFocusProgram?: (prog: string, firstLine: number) => void;
-  machineConfig: MachineConfig;
-  onUpdateMachineConfig: (config: MachineConfig) => void;
-  customToolPresets: ToolPreset[];
-  activePresetId: string;
-  onApplyToolPreset: (preset: ToolPreset) => void;
-  onSaveToolPreset: (name: string) => void;
-  onDeleteToolPreset: (id: string) => void;
+  machineProfiles: MachineProfile[];
+  activeMachineProfile: MachineProfile;
+  onSelectMachineProfile: (id: string) => void;
+  onUpdateActiveMachineConfig: (config: MachineConfig) => void;
+  onDuplicateMachineProfile: (newName: string) => void;
+  onDeleteMachineProfile: (id: string) => void;
+  onResetBuiltinMachineProfile: (id: string) => void;
+  onExportActiveMachineProfile: () => void;
+  onExportAllMachineProfiles: () => void;
+  onImportMachineProfiles: () => void;
   breakpoints: number[];
   onToggleBreakpoint: (lineNumber: number) => void;
   onClearBreakpoints: () => void;
@@ -36,9 +38,8 @@ interface SidebarProps {
 
 const TITLES: Record<SidebarTab, string> = {
   filter: "表示フィルタ & レイヤー",
-  tools: "工具マガジン (T) & 径補正 (D)",
+  machine: "マシン設定 (工具・径補正・仕様)",
   debug: "ブレイクポイント & 自動停止",
-  machine: "機械パラメータ (サイクルタイム)",
 };
 
 export const Sidebar: React.FC<SidebarProps> = (props) => {
@@ -57,16 +58,19 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
             onFocusProgram={props.onFocusProgram}
           />
         )}
-        {props.activeTab === "tools" && (
-          <ToolMagazinePanel
+        {props.activeTab === "machine" && (
+          <MachineProfilePanel
+            profiles={props.machineProfiles}
+            activeProfile={props.activeMachineProfile}
             parseResult={props.parseResult}
-            machineConfig={props.machineConfig}
-            onUpdateMachineConfig={props.onUpdateMachineConfig}
-            customToolPresets={props.customToolPresets}
-            activePresetId={props.activePresetId}
-            onApplyToolPreset={props.onApplyToolPreset}
-            onSaveToolPreset={props.onSaveToolPreset}
-            onDeleteToolPreset={props.onDeleteToolPreset}
+            onSelectProfile={props.onSelectMachineProfile}
+            onUpdateActiveConfig={props.onUpdateActiveMachineConfig}
+            onDuplicateProfile={props.onDuplicateMachineProfile}
+            onDeleteProfile={props.onDeleteMachineProfile}
+            onResetBuiltinProfile={props.onResetBuiltinMachineProfile}
+            onExportActiveProfile={props.onExportActiveMachineProfile}
+            onExportAllProfiles={props.onExportAllMachineProfiles}
+            onImportProfiles={props.onImportMachineProfiles}
           />
         )}
         {props.activeTab === "debug" && (
@@ -77,12 +81,6 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
             onJumpToLine={props.onJumpToLine}
             autoBreak={props.autoBreak}
             onUpdateAutoBreak={props.onUpdateAutoBreak}
-          />
-        )}
-        {props.activeTab === "machine" && (
-          <MachinePanel
-            machineConfig={props.machineConfig}
-            onUpdateMachineConfig={props.onUpdateMachineConfig}
           />
         )}
       </div>

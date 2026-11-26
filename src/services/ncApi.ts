@@ -71,17 +71,20 @@ export async function readNcFileByPath(path: string): Promise<FileReadResult> {
   return invoke<FileReadResult>("read_text_file", { path });
 }
 
-/** ネイティブ保存ダイアログまたは上書き保存 */
+/** ネイティブ保存ダイアログまたは上書き保存（元の文字コードを維持） */
 export async function saveNcFile(
   content: string,
   currentPath: string | null,
   saveAs = false,
+  encoding = "UTF-8",
+  suggestedFileName?: string,
 ): Promise<string | null> {
   let targetPath = saveAs ? null : currentPath;
   if (!targetPath) {
+    const defaultPath = currentPath ?? suggestedFileName ?? "program.nc";
     const picked = await save({
-      title: "NCプログラムを保存",
-      defaultPath: currentPath ?? "program.nc",
+      title: saveAs ? "名前を付けてNCプログラムを保存" : "NCプログラムを保存",
+      defaultPath,
       filters: [
         { name: "NC / DNC プログラム", extensions: ["nc", "dnc", "tap", "gcode", "txt"] },
         { name: "すべてのファイル", extensions: ["*"] },
@@ -91,7 +94,7 @@ export async function saveNcFile(
     targetPath = picked;
   }
 
-  await invoke<void>("write_text_file", { path: targetPath, content });
+  await invoke<void>("write_text_file", { path: targetPath, content, encoding });
   return targetPath;
 }
 
@@ -112,6 +115,43 @@ export async function exportReportFile(
   if (!picked) return null;
   await invoke<void>("write_text_file", { path: picked, content });
   return picked;
+}
+
+/** マシン設定JSONファイルを保存ダイアログでエクスポート */
+export async function exportJsonFile(
+  defaultFileName: string,
+  content: string,
+  title = "マシン設定をエクスポート",
+): Promise<string | null> {
+  const picked = await save({
+    title,
+    defaultPath: defaultFileName,
+    filters: [
+      { name: "マシン設定 JSON", extensions: ["json"] },
+      { name: "すべてのファイル", extensions: ["*"] },
+    ],
+  });
+  if (!picked) return null;
+  await invoke<void>("write_text_file", { path: picked, content });
+  return picked;
+}
+
+/** ネイティブファイル選択ダイアログからJSONファイルを読み込む */
+export async function openJsonFileDialog(
+  title = "マシン設定をインポート",
+): Promise<FileReadResult | null> {
+  const selected = await open({
+    multiple: false,
+    title,
+    filters: [
+      { name: "マシン設定 JSON", extensions: ["json"] },
+      { name: "すべてのファイル", extensions: ["*"] },
+    ],
+  });
+  if (!selected || Array.isArray(selected)) {
+    return null;
+  }
+  return readNcFileByPath(selected);
 }
 
 /** 外部エディタ連動のファイル変更監視を開始 */

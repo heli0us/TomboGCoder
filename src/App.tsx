@@ -1,17 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Bug, Layers, Settings, Wrench } from "lucide-react";
-import { NcEditor } from "./components/NcEditor";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { Bug, Layers, Settings } from "lucide-react";
+import { NcEditor, type EditorSelectionInfo, type NcEditorHandle } from "./components/NcEditor";
 import { ToolpathViewport } from "./components/ToolpathViewport";
 import { Sidebar, type SidebarTab } from "./components/Sidebar";
 import { BottomPanel, type BottomTab } from "./components/BottomPanel";
-import { TopBar } from "./components/TopBar";
+import { TopBar, type RecentFileEntry } from "./components/TopBar";
 import { StatusBar } from "./components/StatusBar";
 import {
+  DragHoverOverlay,
+  DropActionModal,
+  UnsavedChangesModal,
+} from "./components/FileActionModals";
+import {
+  exportJsonFile,
   exportReportFile,
   getMacroSampleNc,
   getSampleNc,
   isTauriRuntime,
   onNcFileChanged,
+  openJsonFileDialog,
   openNcFileDialog,
   parseNcProgram,
   readNcFileByPath,
@@ -22,20 +30,90 @@ import {
 import { buildCsvReport, buildHtmlReport } from "./utils/reportGenerator";
 import { buildFilteredParseResult } from "./utils/filterResult";
 import {
+  BUILTIN_MACHINE_PROFILES,
   type AutoBreakConfig,
   type CameraPreset,
   DEFAULT_AUTO_BREAK,
   DEFAULT_DISPLAY_OPTIONS,
   DEFAULT_MACHINE_CONFIG,
   type DisplayOptions,
+  type FileReadResult,
   type MachineConfig,
+  type MachineProfile,
   type ParseResult,
-  type ToolPreset,
-  type ToolSpec,
 } from "./types/nc";
 
-const TOOL_PRESETS_STORAGE_KEY = "tombo_gcoder_tool_presets_v2";
+const MACHINE_PROFILES_STORAGE_KEY = "tombo_gcoder_machine_profiles_v1";
+const ACTIVE_MACHINE_ID_STORAGE_KEY = "tombo_gcoder_active_machine_id_v1";
 const PLAYBACK_SPEED_STORAGE_KEY = "tombo_gcoder_playback_speed_v1";
+const UI_LAYOUT_STORAGE_KEY = "tombo_gcoder_ui_layout_v1";
+const RECENT_FILES_STORAGE_KEY = "tombo_gcoder_recent_files_v1";
+const MAX_RECENT_FILES = 8;
+
+interface SavedUiLayout {
+  sidebarOpen: boolean;
+  sidebarTab: SidebarTab;
+  sidebarWidth: number;
+  editorOpen: boolean;
+  editorRatio: number;
+  bottomCollapsed: boolean;
+  bottomTab: BottomTab;
+  bottomHeight: number;
+}
+
+const DEFAULT_UI_LAYOUT: SavedUiLayout = {
+  sidebarOpen: true,
+  sidebarTab: "filter",
+  sidebarWidth: 264,
+  editorOpen: true,
+  editorRatio: 0.34,
+  bottomCollapsed: false,
+  bottomTab: "cycle",
+  bottomHeight: 224,
+};
+
+function loadSavedUiLayout(): SavedUiLayout {
+  try {
+    const raw = window.localStorage.getItem(UI_LAYOUT_STORAGE_KEY);
+    if (!raw) return DEFAULT_UI_LAYOUT;
+    const p = JSON.parse(raw) as Partial<SavedUiLayout> & { sidebarTab?: string };
+    return {
+      sidebarOpen: typeof p.sidebarOpen === "boolean" ? p.sidebarOpen : DEFAULT_UI_LAYOUT.sidebarOpen,
+      sidebarTab:
+        p.sidebarTab === "filter" || p.sidebarTab === "machine" || p.sidebarTab === "debug"
+          ? p.sidebarTab
+          : p.sidebarTab === "tools"
+            ? "machine"
+            : DEFAULT_UI_LAYOUT.sidebarTab,
+      sidebarWidth:
+        typeof p.sidebarWidth === "number"
+          ? Math.min(420, Math.max(210, p.sidebarWidth))
+          : DEFAULT_UI_LAYOUT.sidebarWidth,
+      editorOpen: typeof p.editorOpen === "boolean" ? p.editorOpen : DEFAULT_UI_LAYOUT.editorOpen,
+      editorRatio:
+        typeof p.editorRatio === "number"
+          ? Math.min(0.68, Math.max(0.18, p.editorRatio))
+          : DEFAULT_UI_LAYOUT.editorRatio,
+      bottomCollapsed:
+        typeof p.bottomCollapsed === "boolean"
+          ? p.bottomCollapsed
+          : DEFAULT_UI_LAYOUT.bottomCollapsed,
+      bottomTab:
+        p.bottomTab === "cycle" ||
+        p.bottomTab === "problems" ||
+        p.bottomTab === "modal" ||
+        p.bottomTab === "macros"
+          ? p.bottomTab
+          : DEFAULT_UI_LAYOUT.bottomTab,
+      bottomHeight:
+        typeof p.bottomHeight === "number"
+          ? Math.min(460, Math.max(120, p.bottomHeight))
+          : DEFAULT_UI_LAYOUT.bottomHeight,
+    };
+  } catch {
+    return DEFAULT_UI_LAYOUT;
+  }
+}
 
 function loadSavedPlaybackSpeed(): number {
   try {
@@ -48,15 +126,148 @@ function loadSavedPlaybackSpeed(): number {
   }
 }
 
-function loadSavedToolPresets(): ToolPreset[] {
+function cloneMachineConfig(cfg: MachineConfig): MachineConfig {
+  return {
+    ...DEFAULT_MACHINE_CONFIG,
+    ...cfg,
+    tools: Object.fromEntries(
+      Object.entries(cfg.tools ?? {}).map(([k, v]) => [Number(k), { ...v }]),
+    ),
+    toolDiameters: { ...(cfg.toolDiameters ?? {}) },
+    toolLengths: { ...(cfg.toolLengths ?? {}) },
+    workOffsets: Object.fromEntries(
+      Object.entries(cfg.workOffsets ?? DEFAULT_MACHINE_CONFIG.workOffsets).map(([k, v]) => [
+        k,
+        { ...v },
+      ]),
+    ),
+  };
+}
+
+function loadSavedMachineProfiles(): MachineProfile[] {
+  const builtins = BUILTIN_MACHINE_PROFILES.map((p) => ({
+    ...p,
+    config: cloneMachineConfig(p.config),
+  }));
   try {
-    const raw = window.localStorage.getItem(TOOL_PRESETS_STORAGE_KEY);
+    const raw = window.localStorage.getItem(MACHINE_PROFILES_STORAGE_KEY);
+    if (!raw) return builtins;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return builtins;
+
+    const savedValid: MachineProfile[] = parsed
+      .filter(
+        (p): p is MachineProfile =>
+          Boolean(p && typeof p.id === "string" && p.config && typeof p.config === "object"),
+      )
+      .map((p) => ({
+        id: p.id,
+        builtin: Boolean(p.builtin),
+        config: cloneMachineConfig(p.config),
+      }));
+
+    if (savedValid.length === 0) return builtins;
+
+    // 不足している内蔵プロファイルがあれば補完する
+    const savedIds = new Set(savedValid.map((p) => p.id));
+    const missingBuiltins = builtins.filter((b) => !savedIds.has(b.id));
+    return [...missingBuiltins, ...savedValid];
+  } catch {
+    return builtins;
+  }
+}
+
+function loadSavedActiveMachineId(profiles: MachineProfile[]): string {
+  try {
+    const raw = window.localStorage.getItem(ACTIVE_MACHINE_ID_STORAGE_KEY);
+    if (raw && profiles.some((p) => p.id === raw)) return raw;
+  } catch {
+    // ignore
+  }
+  return profiles[0]?.id ?? BUILTIN_MACHINE_PROFILES[0].id;
+}
+
+function sanitizeFileName(name: string): string {
+  const cleaned = name.trim().replace(/[\\/:*?"<>|\s]+/g, "_");
+  return cleaned || "machine";
+}
+
+function loadSavedRecentFiles(): RecentFileEntry[] {
+  try {
+    const raw = window.localStorage.getItem(RECENT_FILES_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((p) => p && typeof p.tools === "object") : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (x): x is RecentFileEntry =>
+          Boolean(x && typeof x.path === "string" && typeof x.fileName === "string"),
+      )
+      .slice(0, MAX_RECENT_FILES);
   } catch {
     return [];
   }
+}
+
+/** 挿入・追記用に、先頭・末尾の単独 "%" 行を任意で取り除く */
+function prepareInsertNcCode(rawContent: string, stripPercent: boolean): string {
+  const normalized = rawContent.replace(/\r\n/g, "\n");
+  if (!stripPercent) return normalized;
+  const lines = normalized.split("\n");
+  while (lines.length > 0 && lines[0].trim() === "") lines.shift();
+  if (lines.length > 0 && lines[0].trim() === "%") lines.shift();
+  while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+  if (lines.length > 0 && lines[lines.length - 1].trim() === "%") lines.pop();
+  return lines.join("\n");
+}
+
+function parseImportedMachineProfiles(rawText: string): MachineProfile[] {
+  const parsed = JSON.parse(rawText) as unknown;
+  const rawItems: unknown[] = [];
+
+  if (Array.isArray(parsed)) {
+    rawItems.push(...parsed);
+  } else if (parsed && typeof parsed === "object") {
+    const obj = parsed as Record<string, unknown>;
+    if (Array.isArray(obj.profiles)) {
+      rawItems.push(...obj.profiles);
+    } else if (obj.config && typeof obj.config === "object") {
+      rawItems.push(obj);
+    } else if (typeof obj.profileName === "string" || typeof obj.rapidRateX === "number") {
+      // 単一の MachineConfig のみの場合も取り込めるようにする
+      rawItems.push({
+        id: `machine-import-${Date.now()}`,
+        builtin: false,
+        config: obj,
+      });
+    }
+  }
+
+  const builtinIds = new Set(BUILTIN_MACHINE_PROFILES.map((b) => b.id));
+  const result: MachineProfile[] = [];
+  rawItems.forEach((item, idx) => {
+    if (!item || typeof item !== "object") return;
+    const rec = item as Record<string, unknown>;
+    const cfgObj =
+      rec.config && typeof rec.config === "object"
+        ? (rec.config as Partial<MachineConfig>)
+        : null;
+    if (!cfgObj) return;
+
+    const rawId = typeof rec.id === "string" && rec.id.trim() ? rec.id.trim() : "";
+    const isBuiltin = builtinIds.has(rawId);
+    const id = rawId || `machine-import-${Date.now()}-${idx}`;
+    const config = cloneMachineConfig(cfgObj as MachineConfig);
+    if (!config.profileName || !config.profileName.trim()) {
+      config.profileName = `インポートマシン ${idx + 1}`;
+    }
+    result.push({ id, builtin: isBuiltin, config });
+  });
+
+  if (result.length === 0) {
+    throw new Error("有効なマシン設定データが見つかりませんでした。");
+  }
+  return result;
 }
 
 export function App() {
@@ -68,11 +279,36 @@ export function App() {
   const [watchExternal, setWatchExternal] = useState<boolean>(true);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
-  const [machineConfig, setMachineConfig] = useState<MachineConfig>(DEFAULT_MACHINE_CONFIG);
-  const [customToolPresets, setCustomToolPresets] = useState<ToolPreset[]>(() =>
-    loadSavedToolPresets(),
+  // マシンプロファイル一覧とアクティブマシン（ローカル自動永続化）
+  const [machineProfiles, setMachineProfiles] = useState<MachineProfile[]>(() =>
+    loadSavedMachineProfiles(),
   );
-  const [activePresetId, setActivePresetId] = useState<string>("builtin-standard-mag");
+  const [activeMachineId, setActiveMachineId] = useState<string>(() =>
+    loadSavedActiveMachineId(loadSavedMachineProfiles()),
+  );
+
+  const activeMachineProfile = useMemo(
+    () => machineProfiles.find((p) => p.id === activeMachineId) ?? machineProfiles[0],
+    [machineProfiles, activeMachineId],
+  );
+  const machineConfig = activeMachineProfile.config;
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(MACHINE_PROFILES_STORAGE_KEY, JSON.stringify(machineProfiles));
+    } catch {
+      // ignore
+    }
+  }, [machineProfiles]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(ACTIVE_MACHINE_ID_STORAGE_KEY, activeMachineId);
+    } catch {
+      // ignore
+    }
+  }, [activeMachineId]);
+
   const [displayOptions, setDisplayOptions] = useState<DisplayOptions>(DEFAULT_DISPLAY_OPTIONS);
   const [parseResult, setParseResult] = useState<ParseResult | null>(null);
   const [parseError, setParseError] = useState<string | null>(null);
@@ -82,15 +318,49 @@ export function App() {
   const [autoBreak, setAutoBreak] = useState<AutoBreakConfig>(DEFAULT_AUTO_BREAK);
   const [breakReason, setBreakReason] = useState<string | null>(null);
 
-  // VS Code レイアウト（全ペイン開閉＆リサイズ対応）
-  const [sidebarOpen, setSidebarOpen] = useState<boolean>(true);
-  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("filter");
-  const [sidebarWidth, setSidebarWidth] = useState<number>(264);
-  const [editorOpen, setEditorOpen] = useState<boolean>(true);
-  const [bottomTab, setBottomTab] = useState<BottomTab>("cycle");
-  const [bottomCollapsed, setBottomCollapsed] = useState<boolean>(false);
-  const [bottomHeight, setBottomHeight] = useState<number>(224);
-  const [editorRatio, setEditorRatio] = useState<number>(0.34);
+  // VS Code レイアウト（全ペイン開閉・サイズ・タブをローカル永続記憶）
+  const initialLayoutRef = useRef<SavedUiLayout | null>(null);
+  if (initialLayoutRef.current === null) {
+    initialLayoutRef.current = loadSavedUiLayout();
+  }
+  const initLayout = initialLayoutRef.current;
+
+  const [sidebarOpen, setSidebarOpen] = useState<boolean>(initLayout.sidebarOpen);
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>(initLayout.sidebarTab);
+  const [sidebarWidth, setSidebarWidth] = useState<number>(initLayout.sidebarWidth);
+  const [editorOpen, setEditorOpen] = useState<boolean>(initLayout.editorOpen);
+  const [bottomTab, setBottomTab] = useState<BottomTab>(initLayout.bottomTab);
+  const [bottomCollapsed, setBottomCollapsed] = useState<boolean>(initLayout.bottomCollapsed);
+  const [bottomHeight, setBottomHeight] = useState<number>(initLayout.bottomHeight);
+  const [editorRatio, setEditorRatio] = useState<number>(initLayout.editorRatio);
+
+  // パネル開閉・サイズ・タブ変更時に自動保存
+  useEffect(() => {
+    try {
+      const payload: SavedUiLayout = {
+        sidebarOpen,
+        sidebarTab,
+        sidebarWidth,
+        editorOpen,
+        editorRatio,
+        bottomCollapsed,
+        bottomTab,
+        bottomHeight,
+      };
+      window.localStorage.setItem(UI_LAYOUT_STORAGE_KEY, JSON.stringify(payload));
+    } catch {
+      // ignore
+    }
+  }, [
+    sidebarOpen,
+    sidebarTab,
+    sidebarWidth,
+    editorOpen,
+    editorRatio,
+    bottomCollapsed,
+    bottomTab,
+    bottomHeight,
+  ]);
 
   // トレース再生状態（デフォルト 30x、変更値はローカル記憶）
   const [activeSegmentIndex, setActiveSegmentIndex] = useState<number>(0);
@@ -111,7 +381,62 @@ export function App() {
   } | null>(null);
 
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
+  const ncEditorRef = useRef<NcEditorHandle | null>(null);
   const dragModeRef = useRef<null | "sidebar" | "editor" | "bottom">(null);
+  const isDirtyRef = useRef<boolean>(false);
+  isDirtyRef.current = isDirty;
+
+  // 最近開いたファイル履歴
+  const [recentFiles, setRecentFiles] = useState<RecentFileEntry[]>(() => loadSavedRecentFiles());
+  // 未保存確認モーダル
+  const [unsavedPrompt, setUnsavedPrompt] = useState<{
+    actionLabel: string;
+    proceed: () => void | Promise<void>;
+  } | null>(null);
+  // ドラッグ＆ドロップ状態・選択モーダル
+  const [isDragOver, setIsDragOver] = useState<boolean>(false);
+  const [pendingDrop, setPendingDrop] = useState<{
+    file: FileReadResult;
+    selection: EditorSelectionInfo;
+  } | null>(null);
+
+  const pushRecentFile = useCallback((path: string, name: string) => {
+    setRecentFiles((prev) => {
+      const next = [{ path, fileName: name }, ...prev.filter((item) => item.path !== path)].slice(
+        0,
+        MAX_RECENT_FILES,
+      );
+      try {
+        window.localStorage.setItem(RECENT_FILES_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  }, []);
+
+  const handleClearRecentFiles = useCallback(() => {
+    setRecentFiles([]);
+    try {
+      window.localStorage.removeItem(RECENT_FILES_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const confirmIfDirty = useCallback(
+    (actionLabel: string, proceed: () => void | Promise<void>) => {
+      if (!isDirtyRef.current) {
+        void proceed();
+        return;
+      }
+      setUnsavedPrompt({ actionLabel, proceed });
+    },
+    [],
+  );
+
+  // ファイル開く・サンプル切替後の「次回解析完了時」に必ず全体センタリングするフラグ
+  const pendingAutoFitRef = useRef<boolean>(true);
   // 全画面切替前のペイン状態を退避
   const prevLayoutRef = useRef<{
     sidebarOpen: boolean;
@@ -171,6 +496,43 @@ export function App() {
     };
   }, []);
 
+  // OSウィンドウタイトルを現在のファイル名・未保存状態と同期
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    getCurrentWindow()
+      .setTitle(`${isDirty ? "● " : ""}${fileName} - TomboGCoder`)
+      .catch(() => {});
+  }, [fileName, isDirty]);
+
+  // ウィンドウを閉じる際の未保存変更ガード
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let unlisten: (() => void) | null = null;
+    let active = true;
+    (async () => {
+      try {
+        unlisten = await getCurrentWindow().onCloseRequested((event) => {
+          if (!active) return;
+          if (isDirtyRef.current) {
+            event.preventDefault();
+            setUnsavedPrompt({
+              actionLabel: "アプリを終了",
+              proceed: async () => {
+                await getCurrentWindow().destroy();
+              },
+            });
+          }
+        });
+      } catch {
+        // ignore
+      }
+    })();
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
+
   // 外部エディタ変更監視
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -190,10 +552,20 @@ export function App() {
           try {
             const reloaded = await readNcFileByPath(changedPath);
             if (!active) return;
-            setSource(reloaded.content);
-            setEncoding(reloaded.encoding);
-            setIsDirty(false);
-            showToast(`外部更新を検知して再読込しました: ${reloaded.fileName}`);
+            const applyReload = () => {
+              setSource(reloaded.content);
+              setEncoding(reloaded.encoding);
+              setIsDirty(false);
+              showToast(`外部更新を検知して再読込しました: ${reloaded.fileName}`);
+            };
+            if (isDirtyRef.current) {
+              setUnsavedPrompt({
+                actionLabel: "外部で更新されたファイルを再読込",
+                proceed: applyReload,
+              });
+            } else {
+              applyReload();
+            }
           } catch (err) {
             setParseError(`自動リロード失敗: ${String(err)}`);
           }
@@ -225,6 +597,11 @@ export function App() {
             const maxIdx = Math.max(0, res.compensatedSegments.length - 1);
             return prev === 0 ? maxIdx : Math.min(prev, maxIdx);
           });
+          // 新規ファイル読込・サンプル切替直後は、新boundingBox確定後に自動で全体センタリング
+          if (pendingAutoFitRef.current && res.boundingBox.valid) {
+            pendingAutoFitRef.current = false;
+            setCameraCommand((c) => ({ preset: "iso", seq: (c?.seq ?? 0) + 1 }));
+          }
         }
       } catch (err) {
         if (!cancelled) setParseError(`NC解析エラー: ${String(err)}`);
@@ -270,11 +647,8 @@ export function App() {
     };
   }, []);
 
-  const handleOpenFile = useCallback(async () => {
-    if (!isTauriRuntime()) return;
-    try {
-      const file = await openNcFileDialog();
-      if (!file) return;
+  const applyOpenedFile = useCallback(
+    (file: FileReadResult) => {
       setIsPlaying(false);
       setBreakReason(null);
       setBreakpoints([]);
@@ -290,52 +664,110 @@ export function App() {
       setEncoding(file.encoding);
       setIsDirty(false);
       setActiveSegmentIndex(0);
-      setCameraCommand((c) => ({ preset: "fit", seq: (c?.seq ?? 0) + 1 }));
-    } catch (err) {
-      setParseError(`ファイルを開けませんでした: ${String(err)}`);
-    }
-  }, []);
+      pendingAutoFitRef.current = true;
+      pushRecentFile(file.path, file.fileName);
+    },
+    [pushRecentFile],
+  );
 
-  const handleSaveFile = useCallback(async () => {
+  const handleOpenFile = useCallback(() => {
     if (!isTauriRuntime()) return;
-    try {
-      const savedPath = await saveNcFile(source, filePath, false);
-      if (savedPath) {
+    confirmIfDirty("別のファイルを開く", async () => {
+      try {
+        const file = await openNcFileDialog();
+        if (!file) return;
+        applyOpenedFile(file);
+      } catch (err) {
+        setParseError(`ファイルを開けませんでした: ${String(err)}`);
+      }
+    });
+  }, [confirmIfDirty, applyOpenedFile]);
+
+  const handleOpenRecentFile = useCallback(
+    (path: string) => {
+      if (!isTauriRuntime()) return;
+      confirmIfDirty("履歴のファイルを開く", async () => {
+        try {
+          const file = await readNcFileByPath(path);
+          applyOpenedFile(file);
+        } catch (err) {
+          setParseError(`ファイルを開けませんでした (${path}): ${String(err)}`);
+        }
+      });
+    },
+    [confirmIfDirty, applyOpenedFile],
+  );
+
+  const performSaveFile = useCallback(
+    async (saveAs: boolean): Promise<boolean> => {
+      if (!isTauriRuntime()) return false;
+      try {
+        const suggested = fileName.replace(/\s*\(.*\)$/, "") || "program.nc";
+        const savedPath = await saveNcFile(source, filePath, saveAs, encoding, suggested);
+        if (!savedPath) return false;
         setFilePath(savedPath);
         const name = savedPath.split(/[\\/]/).pop() ?? "program.nc";
         setFileName(name);
         setIsDirty(false);
-        showToast(`保存しました: ${name}`);
+        pushRecentFile(savedPath, name);
+        showToast(
+          `${saveAs ? "別名で保存" : "保存"}しました: ${name} (${encoding})`,
+        );
+        return true;
+      } catch (err) {
+        setParseError(`保存エラー: ${String(err)}`);
+        return false;
       }
-    } catch (err) {
-      setParseError(`保存エラー: ${String(err)}`);
-    }
-  }, [source, filePath, showToast]);
+    },
+    [source, filePath, fileName, encoding, pushRecentFile, showToast],
+  );
 
-  const handleLoadSample = useCallback(async (mode: "plate" | "macro") => {
-    if (!isTauriRuntime()) return;
-    const sample = mode === "plate" ? await getSampleNc() : await getMacroSampleNc();
-    setIsPlaying(false);
-    setBreakReason(null);
-    setBreakpoints([]);
-    setDisplayOptions((prev) => ({
-      ...prev,
-      hiddenPrograms: [],
-      hiddenTools: [],
-      hiddenDNumbers: [],
-    }));
-    setSource(sample);
-    setFilePath(null);
-    setFileName(mode === "plate" ? "sample_plate.nc (デモ)" : "sample_macro_b.nc (マクロデモ)");
-    setEncoding("UTF-8");
-    setIsDirty(false);
-    setActiveSegmentIndex(0);
-    if (mode === "macro") {
-      setBottomTab("macros");
-      setBottomCollapsed(false);
-    }
-    setCameraCommand((c) => ({ preset: "iso", seq: (c?.seq ?? 0) + 1 }));
-  }, []);
+  const handleSaveFile = useCallback(() => {
+    void performSaveFile(false);
+  }, [performSaveFile]);
+
+  const handleSaveAsFile = useCallback(() => {
+    void performSaveFile(true);
+  }, [performSaveFile]);
+
+  const handleToggleEncoding = useCallback(() => {
+    const next = encoding === "Shift-JIS" ? "UTF-8" : "Shift-JIS";
+    setEncoding(next);
+    setIsDirty(true);
+    showToast(`保存時の文字コードを ${next} に変更しました（Ctrl+S で保存反映）`);
+  }, [encoding, showToast]);
+
+  const handleLoadSample = useCallback(
+    (mode: "plate" | "macro") => {
+      if (!isTauriRuntime()) return;
+      confirmIfDirty("サンプルプログラムを読み込む", async () => {
+        const sample = mode === "plate" ? await getSampleNc() : await getMacroSampleNc();
+        setIsPlaying(false);
+        setBreakReason(null);
+        setBreakpoints([]);
+        setDisplayOptions((prev) => ({
+          ...prev,
+          hiddenPrograms: [],
+          hiddenTools: [],
+          hiddenDNumbers: [],
+        }));
+        setSource(sample);
+        setFilePath(null);
+        setFileName(
+          mode === "plate" ? "sample_plate.nc (デモ)" : "sample_macro_b.nc (マクロデモ)",
+        );
+        setEncoding("UTF-8");
+        setIsDirty(false);
+        setActiveSegmentIndex(0);
+        if (mode === "macro") {
+          setBottomTab("macros");
+          setBottomCollapsed(false);
+        }
+        pendingAutoFitRef.current = true;
+      });
+    },
+    [confirmIfDirty],
+  );
 
   // チェック中の O番号だけで再集計したアクティブ結果（再生・加工時間・範囲・レポートすべてに連動）
   const effectiveResult = useMemo(
@@ -374,80 +806,295 @@ export function App() {
     );
   }, []);
 
-  const handleApplyToolPreset = useCallback(
-    (preset: ToolPreset) => {
-      setActivePresetId(preset.id);
-      const nextTools: Record<number, ToolSpec> = {};
-      const nextDiameters: Record<number, number> = {};
-      for (const [k, spec] of Object.entries(preset.tools)) {
-        const tn = Number(k);
-        if (tn > 0) {
-          nextTools[tn] = { ...spec };
-          nextDiameters[tn] = spec.diameter;
-        }
+  const handleSelectMachineProfile = useCallback(
+    (id: string) => {
+      const target = machineProfiles.find((p) => p.id === id);
+      if (!target) return;
+      setActiveMachineId(id);
+      showToast(`マシンを切り替えました: ${target.config.profileName}`);
+    },
+    [machineProfiles, showToast],
+  );
+
+  const handleUpdateActiveMachineConfig = useCallback(
+    (nextConfig: MachineConfig) => {
+      setMachineProfiles((prev) =>
+        prev.map((p) => (p.id === activeMachineId ? { ...p, config: nextConfig } : p)),
+      );
+    },
+    [activeMachineId],
+  );
+
+  const handleDuplicateMachineProfile = useCallback(
+    (newName: string) => {
+      const id = `machine-custom-${Date.now()}`;
+      const nextProfile: MachineProfile = {
+        id,
+        builtin: false,
+        config: {
+          ...cloneMachineConfig(activeMachineProfile.config),
+          profileName: newName,
+        },
+      };
+      setMachineProfiles((prev) => [...prev, nextProfile]);
+      setActiveMachineId(id);
+      showToast(`新しいマシンを作成しました: ${newName}`);
+    },
+    [activeMachineProfile, showToast],
+  );
+
+  const handleDeleteMachineProfile = useCallback(
+    (id: string) => {
+      const target = machineProfiles.find((p) => p.id === id);
+      if (!target || target.builtin) return;
+      const updated = machineProfiles.filter((p) => p.id !== id);
+      setMachineProfiles(updated);
+      if (activeMachineId === id && updated.length > 0) {
+        setActiveMachineId(updated[0].id);
       }
-      if (preset.diameters) {
-        for (const [k, d] of Object.entries(preset.diameters)) {
-          const dn = Number(k);
-          if (dn > 0) nextDiameters[dn] = d;
-        }
-      }
-      setMachineConfig((prev) => ({
-        ...prev,
-        autoExtractDiameter: false,
-        tools: nextTools,
-        toolDiameters: nextDiameters,
-      }));
-      showToast(`T番号工具プリセットを適用しました: ${preset.name}`);
+      showToast(`カスタムマシンを削除しました: ${target.config.profileName}`);
+    },
+    [machineProfiles, activeMachineId, showToast],
+  );
+
+  const handleResetBuiltinMachineProfile = useCallback(
+    (id: string) => {
+      const builtin = BUILTIN_MACHINE_PROFILES.find((p) => p.id === id);
+      if (!builtin) return;
+      setMachineProfiles((prev) =>
+        prev.map((p) => (p.id === id ? { ...p, config: cloneMachineConfig(builtin.config) } : p)),
+      );
+      showToast(`マシン設定を初期値に戻しました: ${builtin.config.profileName}`);
     },
     [showToast],
   );
 
-  const handleSaveToolPreset = useCallback(
-    (name: string) => {
-      const snapshotTools: Record<number, ToolSpec> = { ...machineConfig.tools };
-      if (machineConfig.autoExtractDiameter && parseResult?.extractedTools) {
-        for (const [k, v] of Object.entries(parseResult.extractedTools)) {
-          const kn = Number(k);
-          if (kn > 0) snapshotTools[kn] = { ...v };
+  const handleExportActiveMachineProfile = useCallback(async () => {
+    if (!isTauriRuntime()) return;
+    try {
+      const payload = JSON.stringify(
+        {
+          app: "TomboGCoder",
+          format: "machine-profiles",
+          version: 1,
+          exportedAt: new Date().toISOString(),
+          profiles: [activeMachineProfile],
+        },
+        null,
+        2,
+      );
+      const defaultName = `${sanitizeFileName(activeMachineProfile.config.profileName)}.machine.json`;
+      const saved = await exportJsonFile(
+        defaultName,
+        payload,
+        `マシン設定を書き出し (${activeMachineProfile.config.profileName})`,
+      );
+      if (saved) {
+        showToast(`マシン設定を書き出しました: ${activeMachineProfile.config.profileName}`);
+      }
+    } catch (err) {
+      setParseError(`マシン設定エクスポートエラー: ${String(err)}`);
+    }
+  }, [activeMachineProfile, showToast]);
+
+  const handleExportAllMachineProfiles = useCallback(async () => {
+    if (!isTauriRuntime()) return;
+    try {
+      const payload = JSON.stringify(
+        {
+          app: "TomboGCoder",
+          format: "machine-profiles",
+          version: 1,
+          exportedAt: new Date().toISOString(),
+          profiles: machineProfiles,
+        },
+        null,
+        2,
+      );
+      const saved = await exportJsonFile(
+        "tombo_machines_backup.json",
+        payload,
+        `全マシン設定を一括バックアップ (${machineProfiles.length}台)`,
+      );
+      if (saved) {
+        showToast(`全${machineProfiles.length}台のマシン設定を書き出しました`);
+      }
+    } catch (err) {
+      setParseError(`全マシン設定エクスポートエラー: ${String(err)}`);
+    }
+  }, [machineProfiles, showToast]);
+
+  const importMachineProfilesFromText = useCallback(
+    (rawText: string) => {
+      const imported = parseImportedMachineProfiles(rawText);
+
+      const nextList = machineProfiles.map((p) => ({
+        ...p,
+        config: cloneMachineConfig(p.config),
+      }));
+      let addedCount = 0;
+      let updatedCount = 0;
+      let focusId: string | null = null;
+
+      for (const item of imported) {
+        if (item.builtin) {
+          const idx = nextList.findIndex((p) => p.id === item.id);
+          if (idx >= 0) {
+            nextList[idx] = { ...nextList[idx], config: item.config };
+            updatedCount += 1;
+            focusId = nextList[idx].id;
+          } else {
+            nextList.push(item);
+            addedCount += 1;
+            focusId = item.id;
+          }
+        } else {
+          // 既存カスタム機と ID または名称が一致すれば上書き、なければ新規追加
+          const byId = nextList.findIndex((p) => !p.builtin && p.id === item.id);
+          const byName =
+            byId >= 0
+              ? byId
+              : nextList.findIndex(
+                  (p) => !p.builtin && p.config.profileName === item.config.profileName,
+                );
+          if (byName >= 0) {
+            nextList[byName] = { ...nextList[byName], config: item.config };
+            updatedCount += 1;
+            focusId = nextList[byName].id;
+          } else {
+            const uniqueId = nextList.some((p) => p.id === item.id)
+              ? `machine-custom-${Date.now()}-${addedCount}`
+              : item.id;
+            nextList.push({ id: uniqueId, builtin: false, config: item.config });
+            addedCount += 1;
+            focusId = uniqueId;
+          }
         }
       }
-      const existing = customToolPresets.find((p) => p.name === name);
-      const id = existing ? existing.id : `custom-${Date.now()}`;
-      const nextPreset: ToolPreset = {
-        id,
-        name,
-        tools: snapshotTools,
-        diameters: { ...machineConfig.toolDiameters },
-      };
-      const updated = existing
-        ? customToolPresets.map((p) => (p.id === id ? nextPreset : p))
-        : [...customToolPresets, nextPreset];
-      setCustomToolPresets(updated);
-      setActivePresetId(id);
-      try {
-        window.localStorage.setItem(TOOL_PRESETS_STORAGE_KEY, JSON.stringify(updated));
-      } catch {
-        // ignore
+
+      setMachineProfiles(nextList);
+      if (focusId) {
+        setActiveMachineId(focusId);
       }
-      showToast(`T番号工具プリセットを保存しました: ${name}`);
+
+      const summaryParts: string[] = [];
+      if (addedCount > 0) summaryParts.push(`追加 ${addedCount}台`);
+      if (updatedCount > 0) summaryParts.push(`更新 ${updatedCount}台`);
+      showToast(`マシン設定を読み込みました (${summaryParts.join(" / ")})`);
     },
-    [machineConfig, parseResult, customToolPresets, showToast],
+    [machineProfiles, showToast],
   );
 
-  const handleDeleteToolPreset = useCallback(
-    (id: string) => {
-      const updated = customToolPresets.filter((p) => p.id !== id);
-      setCustomToolPresets(updated);
-      if (activePresetId === id) setActivePresetId("custom-unsaved");
+  const handleImportMachineProfiles = useCallback(async () => {
+    if (!isTauriRuntime()) return;
+    try {
+      const file = await openJsonFileDialog("マシン設定 JSON をインポート");
+      if (!file) return;
+      importMachineProfilesFromText(file.content);
+    } catch (err) {
+      setParseError(`マシン設定インポートエラー: ${String(err)}`);
+    }
+  }, [importMachineProfilesFromText]);
+
+  // ウィンドウへのファイル ドラッグ＆ドロップ監視（NC: 新規開く/挿入選択、JSON: マシン設定読込）
+  const importMachineRef = useRef(importMachineProfilesFromText);
+  importMachineRef.current = importMachineProfilesFromText;
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let unlisten: (() => void) | null = null;
+    let active = true;
+
+    (async () => {
       try {
-        window.localStorage.setItem(TOOL_PRESETS_STORAGE_KEY, JSON.stringify(updated));
+        unlisten = await getCurrentWindow().onDragDropEvent(async (event) => {
+          if (!active) return;
+          const payload = event.payload;
+          if (payload.type === "enter" || payload.type === "over") {
+            setIsDragOver(true);
+          } else if (payload.type === "leave") {
+            setIsDragOver(false);
+          } else if (payload.type === "drop") {
+            setIsDragOver(false);
+            const firstPath = payload.paths[0];
+            if (!firstPath) return;
+            try {
+              const file = await readNcFileByPath(firstPath);
+              if (!active) return;
+              if (file.fileName.toLowerCase().endsWith(".json")) {
+                importMachineRef.current(file.content);
+                return;
+              }
+              const selection = ncEditorRef.current?.getSelectionInfo() ?? {
+                from: 0,
+                to: 0,
+                lineNumber: 1,
+                endLineNumber: 1,
+                selectedChars: 0,
+              };
+              setPendingDrop({ file, selection });
+            } catch (err) {
+              setParseError(`ドロップファイルの読込に失敗しました: ${String(err)}`);
+            }
+          }
+        });
       } catch {
         // ignore
       }
-      showToast("カスタムプリセットを削除しました");
+    })();
+
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
+
+  const handleDropOpenAsNew = useCallback(() => {
+    if (!pendingDrop) return;
+    const dropped = pendingDrop.file;
+    setPendingDrop(null);
+    confirmIfDirty(`ドロップしたファイル「${dropped.fileName}」を開く`, () => {
+      applyOpenedFile(dropped);
+    });
+  }, [pendingDrop, confirmIfDirty, applyOpenedFile]);
+
+  const handleDropInsertAtSelection = useCallback(
+    (stripPercent: boolean) => {
+      if (!pendingDrop) return;
+      const dropped = pendingDrop.file;
+      const text = prepareInsertNcCode(dropped.content, stripPercent);
+      setPendingDrop(null);
+      if (!editorOpen) {
+        setEditorOpen(true);
+      }
+      const inserted = ncEditorRef.current?.insertAtSelection(text);
+      if (!inserted) {
+        // エディタ未マウント時はソース末尾へ安全にフォールバック挿入
+        setSource((prev) => (prev ? `${prev}\n${text}` : text));
+        setIsDirty(true);
+      }
+      showToast(`選択箇所にコードを挿入しました: ${dropped.fileName} (Ctrl+Z で戻せます)`);
     },
-    [customToolPresets, activePresetId, showToast],
+    [pendingDrop, editorOpen, showToast],
+  );
+
+  const handleDropAppendToEnd = useCallback(
+    (stripPercent: boolean) => {
+      if (!pendingDrop) return;
+      const dropped = pendingDrop.file;
+      const text = prepareInsertNcCode(dropped.content, stripPercent);
+      setPendingDrop(null);
+      if (!editorOpen) {
+        setEditorOpen(true);
+      }
+      const appended = ncEditorRef.current?.appendToEnd(text);
+      if (!appended) {
+        setSource((prev) => (prev ? `${prev}\n${text}` : text));
+        setIsDirty(true);
+      }
+      showToast(`末尾にコードを追記しました: ${dropped.fileName} (Ctrl+Z で戻せます)`);
+    },
+    [pendingDrop, editorOpen, showToast],
   );
 
   const handleExportCsv = useCallback(async () => {
@@ -477,6 +1124,16 @@ export function App() {
   // グローバルキーボードショートカット
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (unsavedPrompt) {
+          setUnsavedPrompt(null);
+          return;
+        }
+        if (pendingDrop) {
+          setPendingDrop(null);
+          return;
+        }
+      }
       const mod = e.metaKey || e.ctrlKey;
       if (mod && e.key.toLowerCase() === "o") {
         e.preventDefault();
@@ -485,7 +1142,11 @@ export function App() {
       }
       if (mod && e.key.toLowerCase() === "s") {
         e.preventDefault();
-        handleSaveFile();
+        if (e.shiftKey) {
+          handleSaveAsFile();
+        } else {
+          handleSaveFile();
+        }
         return;
       }
       if (mod && e.key.toLowerCase() === "b") {
@@ -533,7 +1194,15 @@ export function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [handleOpenFile, handleSaveFile, handleTogglePlay, effectiveResult]);
+  }, [
+    handleOpenFile,
+    handleSaveFile,
+    handleSaveAsFile,
+    handleTogglePlay,
+    effectiveResult,
+    unsavedPrompt,
+    pendingDrop,
+  ]);
 
   const jumpToLine = useCallback(
     (lineNumber: number) => {
@@ -592,14 +1261,25 @@ export function App() {
         isDirty={isDirty}
         isParsing={isParsing}
         watchExternal={watchExternal}
-        profileName={machineConfig.profileName}
+        recentFiles={recentFiles}
+        machineProfiles={machineProfiles}
+        activeMachineProfile={activeMachineProfile}
         sidebarOpen={sidebarOpen}
         editorOpen={editorOpen}
         bottomOpen={!bottomCollapsed}
         onOpenFile={handleOpenFile}
+        onOpenRecentFile={handleOpenRecentFile}
+        onClearRecentFiles={handleClearRecentFiles}
         onSaveFile={handleSaveFile}
+        onSaveAsFile={handleSaveAsFile}
+        onToggleEncoding={handleToggleEncoding}
         onLoadSample={handleLoadSample}
         onToggleWatchExternal={() => setWatchExternal((v) => !v)}
+        onSelectMachineProfile={handleSelectMachineProfile}
+        onOpenMachineSettings={() => {
+          setSidebarTab("machine");
+          setSidebarOpen(true);
+        }}
         onToggleSidebar={() => setSidebarOpen((v) => !v)}
         onToggleEditor={() => setEditorOpen((v) => !v)}
         onToggleBottom={() => setBottomCollapsed((v) => !v)}
@@ -627,9 +1307,8 @@ export function App() {
           {(
             [
               ["filter", Layers, "表示フィルタ・O番号・Zスライス (Cmd/Ctrl+B)"],
-              ["tools", Wrench, "工具マガジン (T番号プリセット) & 径補正 (D)"],
+              ["machine", Settings, "マシン設定 (工具マガジン・径補正・機械仕様)"],
               ["debug", Bug, "ブレイクポイント & 自動停止条件"],
-              ["machine", Settings, "機械パラメータ (サイクルタイム)"],
             ] as const
           ).map(([tab, Icon, title]) => {
             const active = sidebarOpen && sidebarTab === tab;
@@ -668,16 +1347,16 @@ export function App() {
                 onFocusProgram={(prog) => {
                   showToast(`${prog} を単独表示しました（再生・加工時間も連動）`);
                 }}
-                machineConfig={machineConfig}
-                onUpdateMachineConfig={(cfg) => {
-                  setMachineConfig(cfg);
-                  setActivePresetId("custom-unsaved");
-                }}
-                customToolPresets={customToolPresets}
-                activePresetId={activePresetId}
-                onApplyToolPreset={handleApplyToolPreset}
-                onSaveToolPreset={handleSaveToolPreset}
-                onDeleteToolPreset={handleDeleteToolPreset}
+                machineProfiles={machineProfiles}
+                activeMachineProfile={activeMachineProfile}
+                onSelectMachineProfile={handleSelectMachineProfile}
+                onUpdateActiveMachineConfig={handleUpdateActiveMachineConfig}
+                onDuplicateMachineProfile={handleDuplicateMachineProfile}
+                onDeleteMachineProfile={handleDeleteMachineProfile}
+                onResetBuiltinMachineProfile={handleResetBuiltinMachineProfile}
+                onExportActiveMachineProfile={handleExportActiveMachineProfile}
+                onExportAllMachineProfiles={handleExportAllMachineProfiles}
+                onImportMachineProfiles={handleImportMachineProfiles}
                 breakpoints={breakpoints}
                 onToggleBreakpoint={handleToggleBreakpoint}
                 onClearBreakpoints={() => setBreakpoints([])}
@@ -718,6 +1397,7 @@ export function App() {
                   </div>
                   <div className="flex-1 min-h-0">
                     <NcEditor
+                      ref={ncEditorRef}
                       value={source}
                       onChange={(val) => {
                         setSource(val);
@@ -832,6 +1512,42 @@ export function App() {
           setBottomCollapsed(false);
         }}
       />
+
+      {isDragOver && <DragHoverOverlay />}
+
+      {pendingDrop && (
+        <DropActionModal
+          droppedFile={pendingDrop.file}
+          selectionInfo={pendingDrop.selection}
+          editorOpen={editorOpen}
+          isDirty={isDirty}
+          onOpenAsNew={handleDropOpenAsNew}
+          onInsertAtSelection={handleDropInsertAtSelection}
+          onAppendToEnd={handleDropAppendToEnd}
+          onCancel={() => setPendingDrop(null)}
+        />
+      )}
+
+      {unsavedPrompt && (
+        <UnsavedChangesModal
+          fileName={fileName}
+          actionLabel={unsavedPrompt.actionLabel}
+          onSaveAndContinue={async () => {
+            const proceed = unsavedPrompt.proceed;
+            const ok = await performSaveFile(false);
+            if (ok) {
+              setUnsavedPrompt(null);
+              await proceed();
+            }
+          }}
+          onDiscardAndContinue={async () => {
+            const proceed = unsavedPrompt.proceed;
+            setUnsavedPrompt(null);
+            await proceed();
+          }}
+          onCancel={() => setUnsavedPrompt(null)}
+        />
+      )}
     </div>
   );
 }

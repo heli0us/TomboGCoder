@@ -319,6 +319,7 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
   const applyCameraPreset = (preset: CameraPreset | "fit") => {
     const camera = cameraRef.current;
     const controls = controlsRef.current;
+    const container = mountRef.current;
     if (!camera || !controls) return;
 
     const bb = bboxRef.current;
@@ -327,8 +328,26 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     const cx = (min.x + max.x) * 0.5;
     const cy = (min.y + max.y) * 0.5;
     const cz = (min.z + max.z) * 0.5;
-    const span = Math.max(max.x - min.x, max.y - min.y, max.z - min.z, 60);
-    const dist = span * 1.45;
+
+    const sizeX = Math.max(max.x - min.x, 10);
+    const sizeY = Math.max(max.y - min.y, 10);
+    const sizeZ = Math.max(max.z - min.z, 10);
+
+    // ウィンドウ縦横比と視野角 (FOV) を考慮して、バウンディングスフィア全体が必ず収まる距離を算出
+    const aspect = container
+      ? container.clientWidth / Math.max(1, container.clientHeight)
+      : camera.aspect || 1.3;
+    camera.aspect = aspect;
+    const vFovRad = (camera.fov * Math.PI) / 180;
+    const hFovRad = 2 * Math.atan(Math.tan(vFovRad * 0.5) * aspect);
+    const halfMinFov = Math.min(vFovRad, hFovRad) * 0.5;
+
+    const radius = Math.max(Math.hypot(sizeX, sizeY, sizeZ) * 0.5, 25);
+    // 上部HUD・下部トレースバー分の余白も含めて 1.25倍の余裕を確保
+    const dist = (radius / Math.max(0.15, Math.sin(halfMinFov))) * 1.25;
+
+    // fit 用に、target を書き換える前の現在の視線方向ベクトルを保存
+    const prevDir = camera.position.clone().sub(controls.target);
 
     controls.target.set(cx, cy, cz);
     if (preset === "top") {
@@ -338,20 +357,20 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     } else if (preset === "right") {
       camera.position.set(cx + dist, cy, cz);
     } else if (preset === "fit") {
-      // 現在のカメラ角度を維持したまま全体が収まる距離へフィット
-      const curDir = camera.position.clone().sub(controls.target);
-      if (curDir.lengthSq() < 1e-4) {
-        camera.position.set(cx + dist * 0.65, cy - dist * 0.78, cz + dist * 0.65);
+      if (prevDir.lengthSq() < 1e-4) {
+        const isoDir = new THREE.Vector3(0.65, -0.78, 0.65).normalize();
+        camera.position.set(cx + isoDir.x * dist, cy + isoDir.y * dist, cz + isoDir.z * dist);
       } else {
-        curDir.normalize().multiplyScalar(dist);
-        camera.position.set(cx + curDir.x, cy + curDir.y, cz + curDir.z);
+        prevDir.normalize().multiplyScalar(dist);
+        camera.position.set(cx + prevDir.x, cy + prevDir.y, cz + prevDir.z);
       }
     } else {
-      camera.position.set(cx + dist * 0.65, cy - dist * 0.78, cz + dist * 0.65);
+      const isoDir = new THREE.Vector3(0.65, -0.78, 0.65).normalize();
+      camera.position.set(cx + isoDir.x * dist, cy + isoDir.y * dist, cz + isoDir.z * dist);
     }
 
     camera.near = Math.max(0.1, dist * 0.001);
-    camera.far = Math.max(5000, dist * 20);
+    camera.far = Math.max(10000, dist * 25);
     camera.updateProjectionMatrix();
     controls.update();
   };

@@ -71,14 +71,22 @@ fn read_text_file(path: String) -> Result<FileReadResult, String> {
     })
 }
 
-/// ローカルNCファイル・レポートファイルを保存する
+/// ローカルNCファイル・レポートファイルを保存する（Shift-JIS / UTF-8 対応）
 #[tauri::command]
 fn write_text_file(
     path: String,
     content: String,
+    encoding: Option<String>,
     watch_state: State<'_, WatchState>,
 ) -> Result<(), String> {
-    fs::write(&path, content.as_bytes()).map_err(|e| format!("ファイル保存エラー: {}", e))?;
+    let bytes: Vec<u8> = match encoding.as_deref() {
+        Some("Shift-JIS") => {
+            let (encoded, _, _) = SHIFT_JIS.encode(&content);
+            encoded.into_owned()
+        }
+        _ => content.as_bytes().to_vec(),
+    };
+    fs::write(&path, &bytes).map_err(|e| format!("ファイル保存エラー: {}", e))?;
 
     // 自己保存でファイル監視リロードが誤発火しないよう mtime を同期する
     if let Ok(mut guard) = watch_state.inner.lock() {

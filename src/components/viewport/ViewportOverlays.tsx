@@ -88,6 +88,17 @@ interface ViewportOverlaysProps {
   onApplyCameraPreset: (preset: CameraPreset | "fit") => void;
 }
 
+const DRO_VISIBLE_STORAGE_KEY = "tombo_gcoder_show_dro_v1";
+
+function loadSavedShowDro(): boolean {
+  try {
+    const raw = window.localStorage.getItem(DRO_VISIBLE_STORAGE_KEY);
+    return raw === null ? true : raw === "true";
+  } catch {
+    return true;
+  }
+}
+
 export const ViewportOverlays: React.FC<ViewportOverlaysProps> = ({
   containerWidth,
   containerHeight,
@@ -108,8 +119,20 @@ export const ViewportOverlays: React.FC<ViewportOverlaysProps> = ({
   onToggleMaximizeViewport,
   onApplyCameraPreset,
 }) => {
-  const [showDro, setShowDro] = useState(true);
+  const [showDro, setShowDro] = useState<boolean>(() => loadSavedShowDro());
   const [helpOpen, setHelpOpen] = useState(false);
+
+  const toggleDro = () => {
+    setShowDro((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(DRO_VISIBLE_STORAGE_KEY, String(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  };
 
   return (
     <>
@@ -296,7 +319,7 @@ export const ViewportOverlays: React.FC<ViewportOverlaysProps> = ({
           </button>
           <div className="w-px h-3.5 bg-[#353944] mx-0.5" />
           <button
-            onClick={() => setShowDro((v) => !v)}
+            onClick={toggleDro}
             className={`px-1.5 py-0.5 rounded flex items-center gap-1 transition-colors font-mono ${
               showDro
                 ? "bg-[#38bdf8]/20 text-[#7dd3fc]"

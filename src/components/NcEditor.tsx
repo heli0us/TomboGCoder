@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { EditorState, RangeSet, RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
 import {
   Decoration,
@@ -16,6 +16,20 @@ import {
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { search, searchKeymap } from "@codemirror/search";
 import type { Diagnostic } from "../types/nc";
+
+export interface EditorSelectionInfo {
+  from: number;
+  to: number;
+  lineNumber: number;
+  endLineNumber: number;
+  selectedChars: number;
+}
+
+export interface NcEditorHandle {
+  getSelectionInfo: () => EditorSelectionInfo;
+  insertAtSelection: (text: string) => boolean;
+  appendToEnd: (text: string) => boolean;
+}
 
 interface NcEditorProps {
   value: string;
@@ -248,25 +262,70 @@ const vscodeDarkTheme = EditorView.theme(
   { dark: true },
 );
 
-export const NcEditor: React.FC<NcEditorProps> = ({
-  value,
-  onChange,
-  activeLine,
-  diagnostics,
-  breakpoints,
-  onToggleBreakpoint,
-  onLineClick,
-}) => {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const viewRef = useRef<EditorView | null>(null);
-  const onChangeRef = useRef(onChange);
-  const onLineClickRef = useRef(onLineClick);
-  const onToggleBpRef = useRef(onToggleBreakpoint);
-  const suppressEmitRef = useRef(false);
+export const NcEditor = forwardRef<NcEditorHandle, NcEditorProps>(
+  (
+    { value, onChange, activeLine, diagnostics, breakpoints, onToggleBreakpoint, onLineClick },
+    ref,
+  ) => {
+    const containerRef = useRef<HTMLDivElement | null>(null);
+    const viewRef = useRef<EditorView | null>(null);
+    const onChangeRef = useRef(onChange);
+    const onLineClickRef = useRef(onLineClick);
+    const onToggleBpRef = useRef(onToggleBreakpoint);
+    const suppressEmitRef = useRef(false);
 
-  onChangeRef.current = onChange;
-  onLineClickRef.current = onLineClick;
-  onToggleBpRef.current = onToggleBreakpoint;
+    onChangeRef.current = onChange;
+    onLineClickRef.current = onLineClick;
+    onToggleBpRef.current = onToggleBreakpoint;
+
+    useImperativeHandle(
+      ref,
+      () => ({
+        getSelectionInfo: () => {
+          const view = viewRef.current;
+          if (!view) {
+            return { from: 0, to: 0, lineNumber: 1, endLineNumber: 1, selectedChars: 0 };
+          }
+          const sel = view.state.selection.main;
+          const startLine = view.state.doc.lineAt(sel.from).number;
+          const endLine = view.state.doc.lineAt(sel.to).number;
+          return {
+            from: sel.from,
+            to: sel.to,
+            lineNumber: startLine,
+            endLineNumber: endLine,
+            selectedChars: Math.abs(sel.to - sel.from),
+          };
+        },
+        insertAtSelection: (text: string) => {
+          const view = viewRef.current;
+          if (!view) return false;
+          const { from, to } = view.state.selection.main;
+          view.dispatch({
+            changes: { from, to, insert: text },
+            selection: { anchor: from + text.length },
+            scrollIntoView: true,
+          });
+          view.focus();
+          return true;
+        },
+        appendToEnd: (text: string) => {
+          const view = viewRef.current;
+          if (!view) return false;
+          const len = view.state.doc.length;
+          const needsNewline = len > 0 && !view.state.doc.sliceString(len - 1, len).endsWith("\n");
+          const insertText = needsNewline ? `\n${text}` : text;
+          view.dispatch({
+            changes: { from: len, to: len, insert: insertText },
+            selection: { anchor: len + insertText.length },
+            scrollIntoView: true,
+          });
+          view.focus();
+          return true;
+        },
+      }),
+      [],
+    );
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -367,4 +426,7 @@ export const NcEditor: React.FC<NcEditorProps> = ({
   }, [breakpoints]);
 
   return <div ref={containerRef} className="h-full w-full overflow-hidden" />;
-};
+  },
+);
+
+NcEditor.displayName = "NcEditor";

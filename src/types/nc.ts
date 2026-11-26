@@ -191,6 +191,13 @@ export interface ToolPreset {
   builtin?: boolean;
 }
 
+/** 機械ごとの統合プロファイル（機械仕様 + T工具マガジン + D径補正） */
+export interface MachineProfile {
+  id: string;
+  builtin?: boolean;
+  config: MachineConfig;
+}
+
 export interface AutoBreakConfig {
   onToolChange: boolean;
   onZPlunge: boolean;
@@ -318,6 +325,57 @@ export const BUILTIN_TOOL_PRESETS: ToolPreset[] = [
       12: { diameter: 12.0, shape: "endmill", name: "EM Ø12" },
       16: { diameter: 16.0, shape: "endmill", name: "EM Ø16" },
       20: { diameter: 20.0, shape: "endmill", name: "EM Ø20" },
+    },
+  },
+];
+
+export const BUILTIN_MACHINE_PROFILES: MachineProfile[] = [
+  {
+    id: "machine-standard",
+    builtin: true,
+    config: {
+      ...DEFAULT_MACHINE_CONFIG,
+      profileName: "FANUC 標準3軸マシニング",
+      rapidRateX: 24000,
+      rapidRateY: 24000,
+      rapidRateZ: 18000,
+      toolChangeTimeSec: 4.5,
+      accelOverheadFactor: 1.08,
+      tools: { ...BUILTIN_TOOL_PRESETS[0].tools },
+      toolDiameters: { 1: 10.0, 2: 6.0, 3: 8.0, 4: 12.0, 5: 4.0, 6: 3.0, 7: 6.0, 8: 6.0 },
+    },
+  },
+  {
+    id: "machine-robodrill",
+    builtin: true,
+    config: {
+      ...DEFAULT_MACHINE_CONFIG,
+      profileName: "FANUC Robodrill 高速機",
+      rapidRateX: 54000,
+      rapidRateY: 54000,
+      rapidRateZ: 54000,
+      toolChangeTimeSec: 1.6,
+      accelOverheadFactor: 1.05,
+      minBlockTimeSec: 0.01,
+      tools: { ...BUILTIN_TOOL_PRESETS[1].tools },
+      toolDiameters: { 1: 16.0, 2: 10.0, 3: 6.0, 4: 4.0, 5: 6.0, 6: 5.0, 7: 6.8, 8: 8.0 },
+    },
+  },
+  {
+    id: "machine-precision",
+    builtin: true,
+    config: {
+      ...DEFAULT_MACHINE_CONFIG,
+      profileName: "精密・微細加工機 (小径)",
+      rapidRateX: 15000,
+      rapidRateY: 15000,
+      rapidRateZ: 12000,
+      toolChangeTimeSec: 6.0,
+      accelOverheadFactor: 1.12,
+      minBlockTimeSec: 0.02,
+      defaultFeedRate: 200,
+      tools: { ...BUILTIN_TOOL_PRESETS[2].tools },
+      toolDiameters: { 1: 4.0, 2: 2.0, 3: 1.0, 4: 0.5, 5: 2.0, 6: 1.0, 7: 2.0, 8: 1.6 },
     },
   },
 ];
