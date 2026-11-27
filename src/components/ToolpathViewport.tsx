@@ -18,12 +18,14 @@ import {
   type SnapPoint,
   buildToolWidthFillMesh,
   disposeGroupChildren,
-  distToSegment2D,
   extractSnapPoints,
   getMotionColor,
+  getSegmentSnapPoints,
+  projectToSegment2D,
   rebuildToolMeshes,
   samplePolylineAt,
   segmentMatchesZSlice,
+  updateScreenSpaceMarkers,
 } from "../utils/toolpathGeometry";
 import {
   type ActiveSnapHover,
@@ -49,6 +51,8 @@ interface ToolpathViewportProps {
   onStopPlay: () => void;
   playbackSpeed: number;
   onChangePlaybackSpeed: (speed: number) => void;
+  skipToolChangeTime: boolean;
+  onToggleSkipToolChangeTime: () => void;
   breakpoints: number[];
   autoBreak: AutoBreakConfig;
   breakReason: string | null;
@@ -83,6 +87,8 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
   onStopPlay,
   playbackSpeed,
   onChangePlaybackSpeed,
+  skipToolChangeTime,
+  onToggleSkipToolChangeTime,
   breakpoints,
   autoBreak,
   breakReason,
@@ -106,6 +112,7 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
   const toolGroupRef = useRef<THREE.Group | null>(null);
   const toolBuiltKeyRef = useRef<string>("");
   const helperGroupRef = useRef<THREE.Group | null>(null);
+  const stockGroupRef = useRef<THREE.Group | null>(null);
   const measureGroupRef = useRef<THREE.Group | null>(null);
   const pathHandlesRef = useRef<PathBufferHandles | null>(null);
   const liveTimeTextRef = useRef<HTMLSpanElement | null>(null);
@@ -133,10 +140,12 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
 
   const [viewportSize, setViewportSize] = useState({ width: 800, height: 600 });
   const [hoverInfo, setHoverInfo] = useState<HoverInfo | null>(null);
+  const [measureHoverSeg, setMeasureHoverSeg] = useState<PathSegment | null>(null);
   const [navMode, setNavMode] = useState<NavMode>("pan");
   const [zoomBox, setZoomBox] = useState<ZoomBox | null>(null);
   const [measureMode, setMeasureMode] = useState<boolean>(false);
   const [measurePoints, setMeasurePoints] = useState<SnapPoint[]>([]);
+  const [measureAnchor, setMeasureAnchor] = useState<{ x: number; y: number } | null>(null);
   const [snapHover, setSnapHover] = useState<ActiveSnapHover | null>(null);
 
   const hasAutoFittedRef = useRef(false);
@@ -144,8 +153,8 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
   const pointerDownPosRef = useRef<{ x: number; y: number } | null>(null);
 
   // 60fps ループ参照用 Refs
-  const quadViewRef = useRef(displayOptions.quadView);
-  quadViewRef.current = displayOptions.quadView;
+  const viewLayoutRef = useRef(displayOptions.viewLayout);
+  viewLayoutRef.current = displayOptions.viewLayout;
   const traceClipRef = useRef(displayOptions.traceClipFuture);
   traceClipRef.current = displayOptions.traceClipFuture;
   const showToolModelRef = useRef(displayOptions.showToolModel);
@@ -160,6 +169,8 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
   isPlayingRef.current = isPlaying;
   const speedRef = useRef(playbackSpeed);
   speedRef.current = playbackSpeed;
+  const skipAtcRef = useRef(skipToolChangeTime);
+  skipAtcRef.current = skipToolChangeTime;
   const breakpointsRef = useRef(breakpoints);
   breakpointsRef.current = breakpoints;
   const autoBreakRef = useRef(autoBreak);
@@ -211,23 +222,57 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
   const snapPointsRef = useRef<SnapPoint[]>([]);
   snapPointsRef.current = snapPoints;
 
-  /** O(1) GPU setDrawRange + 3D工具座標更新 */
-  const applyVisualFrame = (segIdx: number, progress: number, displayTimeSec: number) => {
+  /** O(1) GPU setDrawRange + 3D工具座標更新（step=0 は加工終了後の全軌道表示、1..N は各ブロック） */
+  const applyVisualFrame = (step: number, progress: number, displayTimeSec: number) => {
     const segs = compSegsRef.current;
     const handles = pathHandlesRef.current;
     const toolGroup = toolGroupRef.current;
     const tipLine = activeTipLineRef.current;
 
-    if (liveTimeTextRef.current) {
-      liveTimeTextRef.current.textContent = formatDuration(displayTimeSec);
-    }
     if (segs.length === 0) {
+      if (liveTimeTextRef.current) liveTimeTextRef.current.textContent = formatDuration(0);
       if (toolGroup) toolGroup.visible = false;
       if (tipLine) tipLine.visible = false;
       return;
     }
 
-    const clampedIdx = Math.max(0, Math.min(segs.length - 1, segIdx));
+    // step === 0: 加工終了後（全軌道表示・工具非表示で全体見やすく）
+    if (step <= 0) {
+      const lastIdx = segs.length - 1;
+      const lastSeg = segs[lastIdx];
+      if (liveTimeTextRef.current) {
+        liveTimeTextRef.current.textContent = formatDuration(lastSeg.cumulativeTimeSec);
+      }
+      if (handles) {
+        handles.cutActiveLine?.geometry.setDrawRange(0, handles.cutVertsAfter[lastIdx]);
+        handles.rapidActiveLine?.geometry.setDrawRange(0, handles.rapidVertsAfter[lastIdx]);
+        if (handles.cutDimLine) handles.cutDimLine.visible = false;
+        if (handles.rapidDimLine) handles.rapidDimLine.visible = false;
+      }
+      if (tipLine) tipLine.visible = false;
+      if (toolGroup) toolGroup.visible = false;
+
+      if (droXRef.current) droXRef.current.textContent = lastSeg.end.x.toFixed(3);
+      if (droYRef.current) droYRef.current.textContent = lastSeg.end.y.toFixed(3);
+      if (droZRef.current) droZRef.current.textContent = lastSeg.end.z.toFixed(3);
+      if (droFeedRef.current) droFeedRef.current.textContent = `F${lastSeg.feedRate.toFixed(0)}`;
+      if (droSpindleRef.current) {
+        droSpindleRef.current.textContent = `S${lastSeg.spindleSpeed.toFixed(0)}`;
+      }
+      if (droToolRef.current) {
+        droToolRef.current.textContent = `T${String(lastSeg.toolNumber).padStart(2, "0")}`;
+      }
+      if (droMotionRef.current) {
+        droMotionRef.current.textContent = "完了";
+      }
+      return;
+    }
+
+    if (liveTimeTextRef.current) {
+      liveTimeTextRef.current.textContent = formatDuration(displayTimeSec);
+    }
+
+    const clampedIdx = Math.max(0, Math.min(segs.length - 1, step - 1));
     const seg = segs[clampedIdx];
     const isComplete = clampedIdx === segs.length - 1 && progress >= 0.999;
 
@@ -294,14 +339,23 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
   useEffect(() => {
     const segs = compensatedSegments;
     if (segs.length === 0) return;
-    const idx = Math.max(0, Math.min(segs.length - 1, activeSegmentIndex));
-    if (isPlayingRef.current && simRef.current.lastReportedIdx === idx) return;
+    const step = Math.max(0, Math.min(segs.length, activeSegmentIndex));
+    if (isPlayingRef.current && simRef.current.lastReportedIdx === step) return;
 
+    if (step === 0) {
+      simRef.current.segIdx = 0;
+      simRef.current.lastReportedIdx = 0;
+      simRef.current.simTimeSec = 0;
+      applyVisualFrame(0, 1.0, segs[segs.length - 1].cumulativeTimeSec);
+      return;
+    }
+
+    const idx = step - 1;
     const seg = segs[idx];
     simRef.current.segIdx = idx;
-    simRef.current.lastReportedIdx = idx;
+    simRef.current.lastReportedIdx = step;
     simRef.current.simTimeSec = seg.cumulativeTimeSec;
-    applyVisualFrame(idx, 1.0, seg.cumulativeTimeSec);
+    applyVisualFrame(step, 1.0, seg.cumulativeTimeSec);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSegmentIndex, compensatedSegments]);
 
@@ -309,10 +363,13 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     if (!isPlaying) return;
     const segs = compensatedSegments;
     if (segs.length === 0) return;
-    const idx = Math.max(0, Math.min(segs.length - 1, activeSegmentIndex));
+    // step=0 または終端から再生するときは 1ブロック目 (idx=0, 時刻0) から開始
+    const step =
+      activeSegmentIndex <= 0 || activeSegmentIndex >= segs.length ? 1 : activeSegmentIndex;
+    const idx = step - 1;
     simRef.current.segIdx = idx;
-    simRef.current.lastReportedIdx = idx;
-    simRef.current.simTimeSec = idx === 0 ? 0 : segs[idx].cumulativeTimeSec;
+    simRef.current.lastReportedIdx = step;
+    simRef.current.simTimeSec = idx === 0 ? 0 : segs[idx - 1].cumulativeTimeSec;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPlaying]);
 
@@ -358,14 +415,16 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
       camera.position.set(cx + dist, cy, cz);
     } else if (preset === "fit") {
       if (prevDir.lengthSq() < 1e-4) {
-        const isoDir = new THREE.Vector3(0.65, -0.78, 0.65).normalize();
+        // 原点側（左手前）からワーク全体を見渡すデフォルト ISO 角度
+        const isoDir = new THREE.Vector3(-0.68, -0.78, 0.68).normalize();
         camera.position.set(cx + isoDir.x * dist, cy + isoDir.y * dist, cz + isoDir.z * dist);
       } else {
         prevDir.normalize().multiplyScalar(dist);
         camera.position.set(cx + prevDir.x, cy + prevDir.y, cz + prevDir.z);
       }
     } else {
-      const isoDir = new THREE.Vector3(0.65, -0.78, 0.65).normalize();
+      // 原点側（左手前 -X, -Y, +Z）からワークを見渡す ISO 角度
+      const isoDir = new THREE.Vector3(-0.68, -0.78, 0.68).normalize();
       camera.position.set(cx + isoDir.x * dist, cy + isoDir.y * dist, cz + isoDir.z * dist);
     }
 
@@ -408,17 +467,29 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        if (measureMode) {
-          setMeasurePoints([]);
-          setMeasureMode(false);
-          setSnapHover(null);
-        }
-        if (navModeRef.current === "windowZoom") {
-          setZoomBox(null);
-          setNavMode("pan");
-        }
+      if (e.key !== "Escape") return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.closest(".cm-editor"))
+      ) {
+        return;
       }
+      if (measureMode) {
+        setMeasurePoints([]);
+        setMeasureAnchor(null);
+        setMeasureMode(false);
+        setSnapHover(null);
+        setMeasureHoverSeg(null);
+      }
+      if (navModeRef.current === "windowZoom") {
+        setZoomBox(null);
+        setNavMode("pan");
+      }
+      // 3D画面で ESC を押したら状態を 0（加工終了後の全体表示）へ戻す
+      callbacksRef.current.onSelectSegmentIndex(0, false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -437,7 +508,6 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     if (!container) return;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color("#141519");
 
     const camera = new THREE.PerspectiveCamera(
       40,
@@ -446,7 +516,7 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
       10000,
     );
     camera.up.set(0, 0, 1);
-    camera.position.set(160, -170, 150);
+    camera.position.set(-160, -170, 150);
     cameraRef.current = camera;
 
     const topCam = new THREE.OrthographicCamera(-100, 100, 100, -100, 0.1, 10000);
@@ -459,8 +529,10 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
 
     const renderer = new THREE.WebGLRenderer({
       antialias: true,
+      alpha: true,
       powerPreference: "high-performance",
     });
+    renderer.setClearColor(0x000000, 0);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(container.clientWidth, container.clientHeight);
     container.appendChild(renderer.domElement);
@@ -504,6 +576,7 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     scene.add(ambient, dirLight);
 
     const helperGroup = new THREE.Group();
+    const stockGroup = new THREE.Group();
     const pathGroup = new THREE.Group();
     const hoverGroup = new THREE.Group();
     const toolGroup = new THREE.Group();
@@ -515,9 +588,10 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     tipLine.renderOrder = 10;
     tipLine.visible = false;
 
-    scene.add(helperGroup, pathGroup, tipLine, hoverGroup, toolGroup, measureGroup);
+    scene.add(helperGroup, stockGroup, pathGroup, tipLine, hoverGroup, toolGroup, measureGroup);
 
     helperGroupRef.current = helperGroup;
+    stockGroupRef.current = stockGroup;
     pathGroupRef.current = pathGroup;
     activeTipLineRef.current = tipLine;
     hoverGroupRef.current = hoverGroup;
@@ -540,6 +614,9 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
         )
       ) {
         return `行 ${nextSeg.lineNumber} (診断エラー検出行)`;
+      }
+      if (ab.onM00 && nextSeg.hasM00) {
+        return `行 ${nextSeg.lineNumber} (M00 プログラムストップ)`;
       }
       if (
         ab.onToolChange &&
@@ -570,10 +647,15 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
         if (segs.length > 0) {
           const sim = simRef.current;
           const totalTime = segs[segs.length - 1].cumulativeTimeSec;
-          const nextTime = Math.min(totalTime, sim.simTimeSec + dt * speedRef.current);
+          let nextTime = Math.min(totalTime, sim.simTimeSec + dt * speedRef.current);
 
           let idx = sim.segIdx;
           let broke = false;
+
+          // ATCスキップON時：現在位置が工具交換ブロックなら待ち時間を瞬間通過
+          if (skipAtcRef.current && segs[idx]?.motionType === "tool_change") {
+            nextTime = Math.max(nextTime, segs[idx].cumulativeTimeSec);
+          }
 
           while (idx < segs.length - 1 && segs[idx].cumulativeTimeSec <= nextTime) {
             const nextIdx = idx + 1;
@@ -581,19 +663,25 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
             idx = nextIdx;
             if (hit) {
               const prevEnd = segs[idx - 1].cumulativeTimeSec;
+              const hitStep = idx + 1;
               sim.segIdx = idx;
               sim.simTimeSec = prevEnd;
-              sim.lastReportedIdx = idx;
-              applyVisualFrame(idx, 0.0, prevEnd);
-              callbacksRef.current.onBreakHit(idx, hit);
+              sim.lastReportedIdx = hitStep;
+              applyVisualFrame(hitStep, 0.0, prevEnd);
+              callbacksRef.current.onBreakHit(hitStep, hit);
               broke = true;
               break;
+            }
+            // ATCスキップON時：新しく入った工具交換ブロックも即スキップ
+            if (skipAtcRef.current && segs[idx].motionType === "tool_change") {
+              nextTime = Math.max(nextTime, segs[idx].cumulativeTimeSec);
             }
           }
 
           if (!broke) {
             sim.segIdx = idx;
             sim.simTimeSec = nextTime;
+            const curStep = idx + 1;
             const seg = segs[idx];
             const prevCum = idx > 0 ? segs[idx - 1].cumulativeTimeSec : 0;
             const progress =
@@ -601,7 +689,7 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
                 ? Math.max(0, Math.min(1, (nextTime - prevCum) / seg.durationSec))
                 : 1;
 
-            applyVisualFrame(idx, progress, nextTime);
+            applyVisualFrame(curStep, progress, nextTime);
 
             if (seg.spindleSpeed > 0 && toolGroup.visible) {
               const flute = toolGroup.getObjectByName("spindle_flute");
@@ -610,13 +698,13 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
               }
             }
 
-            if (sim.lastReportedIdx !== idx) {
-              sim.lastReportedIdx = idx;
-              callbacksRef.current.onSelectSegmentIndex(idx, true);
+            if (sim.lastReportedIdx !== curStep) {
+              sim.lastReportedIdx = curStep;
+              callbacksRef.current.onSelectSegmentIndex(curStep, true);
             }
 
             if (nextTime >= totalTime - 1e-6 && idx >= segs.length - 1) {
-              applyVisualFrame(segs.length - 1, 1.0, totalTime);
+              applyVisualFrame(segs.length, 1.0, totalTime);
               callbacksRef.current.onStopPlay();
             }
           }
@@ -628,17 +716,22 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
       const w = container.clientWidth;
       const h = Math.max(1, container.clientHeight);
 
-      if (!quadViewRef.current) {
+      const layout = viewLayoutRef.current;
+
+      const renderView = (cam: THREE.Camera, vx: number, vy: number, vw: number, vh: number) => {
+        updateScreenSpaceMarkers(hoverGroup, cam, vh);
+        updateScreenSpaceMarkers(measureGroup, cam, vh);
+        renderer.setViewport(vx, vy, vw, vh);
+        if (layout !== "single") renderer.setScissor(vx, vy, vw, vh);
+        renderer.render(scene, cam);
+      };
+
+      if (layout === "single") {
         renderer.setScissorTest(false);
-        renderer.setViewport(0, 0, w, h);
         camera.aspect = w / h;
         camera.updateProjectionMatrix();
-        renderer.render(scene, camera);
+        renderView(camera, 0, 0, w, h);
       } else {
-        const hw = Math.floor(w / 2);
-        const hh = Math.floor(h / 2);
-        const aspect = hw / Math.max(1, hh);
-
         const bb = bboxRef.current;
         const min = bb.valid ? bb.min : { x: -50, y: -50, z: -20 };
         const max = bb.valid ? bb.max : { x: 100, y: 100, z: 50 };
@@ -646,10 +739,16 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
         const cy = (min.y + max.y) * 0.5;
         const cz = (min.z + max.z) * 0.5;
         const halfH = Math.max(max.x - min.x, max.y - min.y, max.z - min.z, 60) * 0.68;
-        const halfW = halfH * aspect;
         const dist = Math.max(halfH * 6, 400);
 
-        const updateOrtho = (cam: THREE.OrthographicCamera, pos: [number, number, number]) => {
+        const updateOrtho = (
+          cam: THREE.OrthographicCamera,
+          pos: [number, number, number],
+          vw: number,
+          vh: number,
+        ) => {
+          const aspect = vw / Math.max(1, vh);
+          const halfW = halfH * aspect;
           cam.left = -halfW;
           cam.right = halfW;
           cam.top = halfH;
@@ -663,26 +762,42 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
 
         renderer.setScissorTest(true);
 
-        updateOrtho(topCam, [cx, cy, cz + dist]);
-        renderer.setViewport(0, hh, hw, h - hh);
-        renderer.setScissor(0, hh, hw, h - hh);
-        renderer.render(scene, topCam);
+        if (layout === "triple") {
+          // 3画面分割：上段(34%)に XY上面・XZ正面、下段(66%)に大きなメイン3D
+          const topH = Math.floor(h * 0.34);
+          const mainH = Math.max(1, h - topH);
+          const hw = Math.floor(w / 2);
 
-        camera.aspect = (w - hw) / Math.max(1, h - hh);
-        camera.updateProjectionMatrix();
-        renderer.setViewport(hw, hh, w - hw, h - hh);
-        renderer.setScissor(hw, hh, w - hw, h - hh);
-        renderer.render(scene, camera);
+          updateOrtho(topCam, [cx, cy, cz + dist], hw, topH);
+          renderView(topCam, 0, mainH, hw, topH);
 
-        updateOrtho(frontCam, [cx, cy - dist, cz]);
-        renderer.setViewport(0, 0, hw, hh);
-        renderer.setScissor(0, 0, hw, hh);
-        renderer.render(scene, frontCam);
+          updateOrtho(frontCam, [cx, cy - dist, cz], w - hw, topH);
+          renderView(frontCam, hw, mainH, w - hw, topH);
 
-        updateOrtho(rightCam, [cx + dist, cy, cz]);
-        renderer.setViewport(hw, 0, w - hw, hh);
-        renderer.setScissor(hw, 0, w - hw, hh);
-        renderer.render(scene, rightCam);
+          camera.aspect = w / mainH;
+          camera.updateProjectionMatrix();
+          renderView(camera, 0, 0, w, mainH);
+        } else {
+          // 4面図：上段(32%)に XY上面・XZ正面・YZ側面、下段(68%)に大きなメイン3D
+          const topH = Math.floor(h * 0.32);
+          const mainH = Math.max(1, h - topH);
+          const w1 = Math.floor(w / 3);
+          const w2 = Math.floor((w * 2) / 3) - w1;
+          const w3 = w - w1 - w2;
+
+          updateOrtho(topCam, [cx, cy, cz + dist], w1, topH);
+          renderView(topCam, 0, mainH, w1, topH);
+
+          updateOrtho(frontCam, [cx, cy - dist, cz], w2, topH);
+          renderView(frontCam, w1, mainH, w2, topH);
+
+          updateOrtho(rightCam, [cx + dist, cy, cz], w3, topH);
+          renderView(rightCam, w1 + w2, mainH, w3, topH);
+
+          camera.aspect = w / mainH;
+          camera.updateProjectionMatrix();
+          renderView(camera, 0, 0, w, mainH);
+        }
       }
     };
     rafId = requestAnimationFrame(animate);
@@ -733,7 +848,7 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     const divisions = Math.max(10, Math.min(80, Math.round(gridSize / 10)));
 
     if (displayOptions.showGrid) {
-      const grid = new THREE.GridHelper(gridSize, divisions, 0x333946, 0x20232b);
+      const grid = new THREE.GridHelper(gridSize, divisions, 0x2c374a, 0x1c212c);
       grid.rotation.x = Math.PI / 2;
       if (boundingBox.valid) {
         grid.position.set(
@@ -761,6 +876,62 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boundingBox, displayOptions.showGrid, displayOptions.showBoundingBox]);
+
+  // 2.5. 透過ストック（四角：直方体 / 丸：円柱）描画
+  useEffect(() => {
+    const sg = stockGroupRef.current;
+    if (!sg) return;
+    disposeGroupChildren(sg);
+
+    const stock = displayOptions.stock;
+    if (!stock.enabled) return;
+
+    const sz = Math.max(0.5, stock.sizeZ);
+    const centerZ = stock.topZ - sz * 0.5;
+    let geom: THREE.BufferGeometry;
+    let cx: number;
+    let cy: number;
+
+    if (stock.shape === "cylinder") {
+      const r = Math.max(0.5, stock.diameter * 0.5);
+      geom = new THREE.CylinderGeometry(r, r, sz, 48);
+      geom.rotateX(Math.PI / 2);
+      cx = stock.originX;
+      cy = stock.originY;
+    } else {
+      const sx = Math.max(0.5, stock.sizeX);
+      const sy = Math.max(0.5, stock.sizeY);
+      geom = new THREE.BoxGeometry(sx, sy, sz);
+      cx = stock.originX + sx * 0.5;
+      cy = stock.originY + sy * 0.5;
+    }
+
+    const meshMat = new THREE.MeshStandardMaterial({
+      color: 0x38bdf8,
+      metalness: 0.15,
+      roughness: 0.55,
+      transparent: true,
+      opacity: Math.max(0.05, Math.min(0.6, stock.opacity)),
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(geom, meshMat);
+    mesh.position.set(cx, cy, centerZ);
+    mesh.renderOrder = 1;
+
+    const edges = new THREE.LineSegments(
+      new THREE.EdgesGeometry(geom, 18),
+      new THREE.LineBasicMaterial({
+        color: 0x7dd3fc,
+        transparent: true,
+        opacity: Math.min(0.85, stock.opacity + 0.35),
+      }),
+    );
+    edges.position.set(cx, cy, centerZ);
+    edges.renderOrder = 1;
+
+    sg.add(mesh, edges);
+  }, [displayOptions.stock]);
 
   useEffect(() => {
     if (!cameraCommand) return;
@@ -930,8 +1101,12 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
       }
     }
 
-    const idx = Math.max(0, Math.min(compensatedSegments.length - 1, activeSegmentIndex));
-    applyVisualFrame(idx, 1.0, compensatedSegments[idx]?.cumulativeTimeSec ?? 0);
+    const step = Math.max(0, Math.min(compensatedSegments.length, activeSegmentIndex));
+    const tSec =
+      step === 0
+        ? (compensatedSegments[compensatedSegments.length - 1]?.cumulativeTimeSec ?? 0)
+        : (compensatedSegments[step - 1]?.cumulativeTimeSec ?? 0);
+    applyVisualFrame(step, 1.0, tSec);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     visibleCompSegments,
@@ -944,76 +1119,81 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
   ]);
 
   useEffect(() => {
-    const idx = Math.max(0, Math.min(compensatedSegments.length - 1, activeSegmentIndex));
-    applyVisualFrame(idx, isPlaying ? 0.5 : 1.0, compensatedSegments[idx]?.cumulativeTimeSec ?? 0);
+    const step = Math.max(0, Math.min(compensatedSegments.length, activeSegmentIndex));
+    const tSec =
+      step === 0
+        ? (compensatedSegments[compensatedSegments.length - 1]?.cumulativeTimeSec ?? 0)
+        : (compensatedSegments[step - 1]?.cumulativeTimeSec ?? 0);
+    applyVisualFrame(step, isPlaying ? 0.5 : 1.0, tSec);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [displayOptions.traceClipFuture, displayOptions.showToolModel]);
 
-  // 4. マウスオーバー中パスのハイライト描画
+  // 4. マウスオーバー中パス（通常＆計測モード共通）のハイライト描画（ボッチは画面相対サイズ）
   useEffect(() => {
     const hg = hoverGroupRef.current;
     if (!hg) return;
     disposeGroupChildren(hg);
 
-    const seg = hoverInfo?.segment;
+    const seg = measureMode ? measureHoverSeg : hoverInfo?.segment;
     if (!seg || seg.points.length < 2) return;
 
     const pts = seg.points.map((p) => new THREE.Vector3(p.x, p.y, p.z));
+    const lineColor = measureMode ? 0xff3b30 : 0xffffff;
     const line = new THREE.Line(
       new THREE.BufferGeometry().setFromPoints(pts),
-      new THREE.LineBasicMaterial({ color: 0xffffff, depthTest: false }),
+      new THREE.LineBasicMaterial({ color: lineColor, depthTest: false }),
     );
     line.renderOrder = 15;
     hg.add(line);
 
-    const span = boundingBox.valid
-      ? Math.max(boundingBox.max.x - boundingBox.min.x, boundingBox.max.y - boundingBox.min.y, 80)
-      : 100;
-    const dotR = Math.max(0.55, span * 0.0055);
+    const addRelDot = (pos: Point3, color: number, screenPx: number, order: number) => {
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(1, 14, 14),
+        new THREE.MeshBasicMaterial({ color, depthTest: false }),
+      );
+      mesh.position.set(pos.x, pos.y, pos.z);
+      mesh.userData.screenPx = screenPx;
+      mesh.renderOrder = order;
+      hg.add(mesh);
+    };
 
-    const startDot = new THREE.Mesh(
-      new THREE.SphereGeometry(dotR, 12, 12),
-      new THREE.MeshBasicMaterial({ color: 0x4ade80, depthTest: false }),
-    );
-    startDot.position.set(seg.start.x, seg.start.y, seg.start.z);
-    startDot.renderOrder = 16;
+    if (!measureMode) {
+      addRelDot(seg.start, 0x4ade80, 3.6, 16);
+      addRelDot(seg.end, 0xffffff, 4.0, 16);
+    } else {
+      // 計測モード中はハイライト中の軌道の特徴点（端点・中点）を控えめな相対ドットでガイド表示
+      addRelDot(seg.start, 0xfef08a, 3.0, 16);
+      addRelDot(seg.end, 0xfef08a, 3.0, 16);
+      const mid = samplePolylineAt(seg.points, 0.5).pos;
+      addRelDot(mid, 0x38bdf8, 3.2, 16);
+    }
 
-    const endDot = new THREE.Mesh(
-      new THREE.SphereGeometry(dotR * 1.15, 12, 12),
-      new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false }),
-    );
-    endDot.position.set(seg.end.x, seg.end.y, seg.end.z);
-    endDot.renderOrder = 16;
-
-    hg.add(startDot, endDot);
-
-    // 円弧補間 (G02/G03) の場合は円の中心マーカー（クロス＋球）と始終点への半径ガイド破線を表示
+    // 円弧補間 (G02/G03) の場合は円の中心マーカー（相対サイズ十字クロス＋球）と半径ガイド破線を表示
     if (seg.arcCenter) {
       const c = seg.arcCenter;
       const cVec = new THREE.Vector3(c.x, c.y, c.z);
 
-      const centerDot = new THREE.Mesh(
-        new THREE.SphereGeometry(dotR * 1.2, 14, 14),
-        new THREE.MeshBasicMaterial({ color: 0xfacc15, depthTest: false }),
-      );
-      centerDot.position.copy(cVec);
-      centerDot.renderOrder = 17;
+      addRelDot(c, 0xfacc15, 4.0, 17);
 
-      // 中心十字クロス
-      const crossSize = Math.max(dotR * 3.2, 2.0);
+      // 中心十字クロス（原点基準の単位長 1.0 で作り screenPx で相対スケール）
       const crossPts = [
-        new THREE.Vector3(c.x - crossSize, c.y, c.z),
-        new THREE.Vector3(c.x + crossSize, c.y, c.z),
-        new THREE.Vector3(c.x, c.y - crossSize, c.z),
-        new THREE.Vector3(c.x, c.y + crossSize, c.z),
+        new THREE.Vector3(-1, 0, 0),
+        new THREE.Vector3(1, 0, 0),
+        new THREE.Vector3(0, -1, 0),
+        new THREE.Vector3(0, 1, 0),
       ];
       const crossLines = new THREE.LineSegments(
         new THREE.BufferGeometry().setFromPoints(crossPts),
         new THREE.LineBasicMaterial({ color: 0xfacc15, depthTest: false }),
       );
+      crossLines.position.copy(cVec);
+      crossLines.userData.screenPx = 10.5;
       crossLines.renderOrder = 17;
 
-      // 中心→始点 / 中心→終点 の半径ガイド破線
+      const radiusLen = Math.max(
+        1,
+        Math.hypot(seg.start.x - c.x, seg.start.y - c.y, seg.start.z - c.z),
+      );
       const guidePts = [
         cVec,
         new THREE.Vector3(seg.start.x, seg.start.y, seg.start.z),
@@ -1024,8 +1204,8 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
         new THREE.BufferGeometry().setFromPoints(guidePts),
         new THREE.LineDashedMaterial({
           color: 0xfde047,
-          dashSize: Math.max(1.5, dotR * 2),
-          gapSize: Math.max(1.2, dotR * 1.6),
+          dashSize: Math.max(0.8, radiusLen * 0.08),
+          gapSize: Math.max(0.6, radiusLen * 0.06),
           transparent: true,
           opacity: 0.72,
           depthTest: false,
@@ -1034,30 +1214,26 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
       guideLines.computeLineDistances();
       guideLines.renderOrder = 14;
 
-      hg.add(centerDot, crossLines, guideLines);
+      hg.add(crossLines, guideLines);
     }
-  }, [hoverInfo?.segment, boundingBox]);
+  }, [hoverInfo?.segment, measureHoverSeg, measureMode]);
 
-  // 5. スナップ計測3Dオーバーレイ
+  // 5. スナップ計測3Dオーバーレイ（全ボッチを画面ピクセル基準の相対サイズに統一）
   useEffect(() => {
     const mg = measureGroupRef.current;
     if (!mg) return;
     disposeGroupChildren(mg);
 
-    const addMarker = (pos: Point3, color: number, radius: number) => {
+    const addRelMarker = (pos: Point3, color: number, screenPx: number) => {
       const mesh = new THREE.Mesh(
-        new THREE.SphereGeometry(radius, 16, 16),
+        new THREE.SphereGeometry(1, 16, 16),
         new THREE.MeshBasicMaterial({ color, depthTest: false }),
       );
       mesh.position.set(pos.x, pos.y, pos.z);
+      mesh.userData.screenPx = screenPx;
       mesh.renderOrder = 20;
       mg.add(mesh);
     };
-
-    const span = boundingBox.valid
-      ? Math.max(boundingBox.max.x - boundingBox.min.x, boundingBox.max.y - boundingBox.min.y, 80)
-      : 100;
-    const markerR = Math.max(0.8, span * 0.008);
 
     if (snapHover && measureMode) {
       const color =
@@ -1065,11 +1241,13 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
           ? 0xfacc15
           : snapHover.snap.kind === "midpoint"
             ? 0x38bdf8
-            : 0x4ade80;
-      addMarker(snapHover.snap.pos, color, markerR * 1.1);
+            : snapHover.snap.kind === "center"
+              ? 0x4ade80
+              : 0xf472b6;
+      addRelMarker(snapHover.snap.pos, color, 4.8);
     }
 
-    for (const mp of measurePoints) addMarker(mp.pos, 0xf97316, markerR * 1.25);
+    for (const mp of measurePoints) addRelMarker(mp.pos, 0xf97316, 5.2);
 
     if (measurePoints.length === 2) {
       const [p0, p1] = [measurePoints[0].pos, measurePoints[1].pos];
@@ -1084,6 +1262,7 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
       mg.add(line);
     } else if (measurePoints.length === 1 && snapHover && measureMode) {
       const [p0, p1] = [measurePoints[0].pos, snapHover.snap.pos];
+      const segDist = Math.max(1, Math.hypot(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z));
       const line = new THREE.Line(
         new THREE.BufferGeometry().setFromPoints([
           new THREE.Vector3(p0.x, p0.y, p0.z),
@@ -1091,8 +1270,8 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
         ]),
         new THREE.LineDashedMaterial({
           color: 0xfdba74,
-          dashSize: 2,
-          gapSize: 2,
+          dashSize: Math.max(0.8, segDist * 0.04),
+          gapSize: Math.max(0.6, segDist * 0.03),
           depthTest: false,
         }),
       );
@@ -1100,7 +1279,7 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
       line.renderOrder = 19;
       mg.add(line);
     }
-  }, [measurePoints, snapHover, measureMode, boundingBox]);
+  }, [measurePoints, snapHover, measureMode]);
 
   // ピッキングヘルパー
   const resolveActiveViewport = (clientX: number, clientY: number) => {
@@ -1112,50 +1291,65 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     const mx = clientX - rect.left;
     const my = clientY - rect.top;
 
-    if (!quadViewRef.current) {
+    const layout = viewLayoutRef.current;
+    if (layout === "single") {
       return { cam: camera as THREE.Camera, vx: 0, vy: 0, vw: rect.width, vh: rect.height, mx, my };
     }
-    const hw = rect.width / 2;
-    const hh = rect.height / 2;
     const orthos = orthoCamsRef.current;
     if (!orthos) return null;
 
-    if (mx < hw && my < hh) return { cam: orthos.top as THREE.Camera, vx: 0, vy: 0, vw: hw, vh: hh, mx, my };
-    if (mx >= hw && my < hh) return { cam: camera as THREE.Camera, vx: hw, vy: 0, vw: hw, vh: hh, mx, my };
-    if (mx < hw && my >= hh) return { cam: orthos.front as THREE.Camera, vx: 0, vy: hh, vw: hw, vh: hh, mx, my };
-    return { cam: orthos.right as THREE.Camera, vx: hw, vy: hh, vw: hw, vh: hh, mx, my };
-  };
-
-  const pickSnapPointAt = (clientX: number, clientY: number): ActiveSnapHover | null => {
-    const vp = resolveActiveViewport(clientX, clientY);
-    if (!vp) return null;
-
-    const v = new THREE.Vector3();
-    let best: SnapPoint | null = null;
-    let bestDist = 18.0;
-
-    for (const sp of snapPointsRef.current) {
-      v.set(sp.pos.x, sp.pos.y, sp.pos.z).project(vp.cam);
-      if (v.z > 1) continue;
-      const sx = vp.vx + (v.x * 0.5 + 0.5) * vp.vw;
-      const sy = vp.vy + (-v.y * 0.5 + 0.5) * vp.vh;
-      const d = Math.hypot(vp.mx - sx, vp.my - sy);
-      if (d < bestDist) {
-        bestDist = d;
-        best = sp;
+    if (layout === "triple") {
+      const topH = rect.height * 0.34;
+      const hw = rect.width * 0.5;
+      if (my < topH) {
+        if (mx < hw) return { cam: orthos.top as THREE.Camera, vx: 0, vy: 0, vw: hw, vh: topH, mx, my };
+        return { cam: orthos.front as THREE.Camera, vx: hw, vy: 0, vw: rect.width - hw, vh: topH, mx, my };
       }
+      return {
+        cam: camera as THREE.Camera,
+        vx: 0,
+        vy: topH,
+        vw: rect.width,
+        vh: rect.height - topH,
+        mx,
+        my,
+      };
     }
-    return best ? { snap: best, x: vp.mx, y: vp.my } : null;
+
+    // 4面図（上3面: XY / XZ / YZ、下: メイン3D）
+    const topH = rect.height * 0.32;
+    const w1 = rect.width / 3;
+    const w2 = (rect.width * 2) / 3;
+    if (my < topH) {
+      if (mx < w1) return { cam: orthos.top as THREE.Camera, vx: 0, vy: 0, vw: w1, vh: topH, mx, my };
+      if (mx < w2) return { cam: orthos.front as THREE.Camera, vx: w1, vy: 0, vw: w2 - w1, vh: topH, mx, my };
+      return { cam: orthos.right as THREE.Camera, vx: w2, vy: 0, vw: rect.width - w2, vh: topH, mx, my };
+    }
+    return {
+      cam: camera as THREE.Camera,
+      vx: 0,
+      vy: topH,
+      vw: rect.width,
+      vh: rect.height - topH,
+      mx,
+      my,
+    };
   };
 
-  const pickSegmentAt = (clientX: number, clientY: number): PathSegment | null => {
+  /** マウス直下の最も近い軌道セグメントと、その軌道上の正確な3D最近点を検出 */
+  const pickSegmentWithNearestAt = (
+    clientX: number,
+    clientY: number,
+    maxPx = 12.0,
+  ): { segment: PathSegment; nearestPos: Point3; distPx: number; mx: number; my: number } | null => {
     const vp = resolveActiveViewport(clientX, clientY);
     if (!vp) return null;
 
     const v0 = new THREE.Vector3();
     const v1 = new THREE.Vector3();
     let bestSeg: PathSegment | null = null;
-    let bestDist = 11.0;
+    let bestPos: Point3 | null = null;
+    let bestDist = maxPx;
 
     const segs = pickableRef.current;
     const stride = segs.length > 25000 ? Math.ceil(segs.length / 25000) : 1;
@@ -1163,11 +1357,13 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     for (let sIdx = 0; sIdx < segs.length; sIdx += stride) {
       const seg = segs[sIdx];
       const pts = seg.points;
-      const ptStride = pts.length > 16 ? Math.ceil(pts.length / 16) : 1;
+      const ptStride = pts.length > 64 ? Math.ceil(pts.length / 64) : 1;
       for (let i = 0; i < pts.length - 1; i += ptStride) {
         const j = Math.min(pts.length - 1, i + ptStride);
-        v0.set(pts[i].x, pts[i].y, pts[i].z).project(vp.cam);
-        v1.set(pts[j].x, pts[j].y, pts[j].z).project(vp.cam);
+        const p0 = pts[i];
+        const p1 = pts[j];
+        v0.set(p0.x, p0.y, p0.z).project(vp.cam);
+        v1.set(p1.x, p1.y, p1.z).project(vp.cam);
         if (v0.z > 1 && v1.z > 1) continue;
 
         const sx0 = vp.vx + (v0.x * 0.5 + 0.5) * vp.vw;
@@ -1175,14 +1371,87 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
         const sx1 = vp.vx + (v1.x * 0.5 + 0.5) * vp.vw;
         const sy1 = vp.vy + (-v1.y * 0.5 + 0.5) * vp.vh;
 
-        const d = distToSegment2D(vp.mx, vp.my, sx0, sy0, sx1, sy1);
-        if (d < bestDist) {
-          bestDist = d;
+        const { dist, t } = projectToSegment2D(vp.mx, vp.my, sx0, sy0, sx1, sy1);
+        if (dist < bestDist) {
+          bestDist = dist;
           bestSeg = seg;
+          bestPos = {
+            x: p0.x + (p1.x - p0.x) * t,
+            y: p0.y + (p1.y - p0.y) * t,
+            z: p0.z + (p1.z - p0.z) * t,
+          };
         }
       }
     }
-    return bestSeg;
+    return bestSeg && bestPos
+      ? { segment: bestSeg, nearestPos: bestPos, distPx: bestDist, mx: vp.mx, my: vp.my }
+      : null;
+  };
+
+  /** 二点間計測ピッカー：ハイライト中軌道の特徴点 → 全体特徴点 → 軌道上最近点の優先順でスナップ */
+  const pickMeasureTargetAt = (
+    clientX: number,
+    clientY: number,
+  ): { hoverSeg: PathSegment | null; snap: ActiveSnapHover | null } => {
+    const vp = resolveActiveViewport(clientX, clientY);
+    if (!vp) return { hoverSeg: null, snap: null };
+
+    const segHit = pickSegmentWithNearestAt(clientX, clientY, 13.0);
+    const v = new THREE.Vector3();
+
+    // 1) ホバー中軌道自身の特徴点（端点・円弧実中点・円弧中心）を最優先スナップ
+    if (segHit) {
+      let localBest: SnapPoint | null = null;
+      let localDist = 16.0;
+      for (const sp of getSegmentSnapPoints(segHit.segment)) {
+        v.set(sp.pos.x, sp.pos.y, sp.pos.z).project(vp.cam);
+        if (v.z > 1) continue;
+        const sx = vp.vx + (v.x * 0.5 + 0.5) * vp.vw;
+        const sy = vp.vy + (-v.y * 0.5 + 0.5) * vp.vh;
+        const d = Math.hypot(vp.mx - sx, vp.my - sy);
+        if (d < localDist) {
+          localDist = d;
+          localBest = sp;
+        }
+      }
+      if (localBest) {
+        return {
+          hoverSeg: segHit.segment,
+          snap: { snap: localBest, x: vp.mx, y: vp.my },
+        };
+      }
+    }
+
+    // 2) 全セグメントの特徴点（円弧中心など軌道線から離れた特徴点も含む）
+    let globalBest: SnapPoint | null = null;
+    let globalDist = 15.0;
+    for (const sp of snapPointsRef.current) {
+      v.set(sp.pos.x, sp.pos.y, sp.pos.z).project(vp.cam);
+      if (v.z > 1) continue;
+      const sx = vp.vx + (v.x * 0.5 + 0.5) * vp.vw;
+      const sy = vp.vy + (-v.y * 0.5 + 0.5) * vp.vh;
+      const d = Math.hypot(vp.mx - sx, vp.my - sy);
+      if (d < globalDist) {
+        globalDist = d;
+        globalBest = sp;
+      }
+    }
+    if (globalBest) {
+      return {
+        hoverSeg: segHit?.segment ?? null,
+        snap: { snap: globalBest, x: vp.mx, y: vp.my },
+      };
+    }
+
+    // 3) 軌道上にポインタがあれば軌道上の最近点を取得
+    if (segHit) {
+      return {
+        hoverSeg: segHit.segment,
+        snap: { snap: { pos: segHit.nearestPos, kind: "onpath" }, x: vp.mx, y: vp.my },
+      };
+    }
+
+    return { hoverSeg: null, snap: null };
   };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -1196,17 +1465,19 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     if (e.buttons !== 0) {
       if (hoverInfo) setHoverInfo(null);
       if (snapHover) setSnapHover(null);
+      if (measureHoverSeg) setMeasureHoverSeg(null);
       return;
     }
     if (measureMode) {
-      setHoverInfo(null);
-      setSnapHover(pickSnapPointAt(e.clientX, e.clientY));
+      if (hoverInfo) setHoverInfo(null);
+      const res = pickMeasureTargetAt(e.clientX, e.clientY);
+      setMeasureHoverSeg(res.hoverSeg);
+      setSnapHover(res.snap);
       return;
     }
-    const seg = pickSegmentAt(e.clientX, e.clientY);
-    if (seg) {
-      const rect = e.currentTarget.getBoundingClientRect();
-      setHoverInfo({ segment: seg, x: e.clientX - rect.left, y: e.clientY - rect.top });
+    const segHit = pickSegmentWithNearestAt(e.clientX, e.clientY, 11.0);
+    if (segHit) {
+      setHoverInfo({ segment: segHit.segment, x: segHit.mx, y: segHit.my });
     } else if (hoverInfo) {
       setHoverInfo(null);
     }
@@ -1236,14 +1507,29 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
       return;
     }
     if (measureMode) {
-      const found = pickSnapPointAt(e.clientX, e.clientY);
-      if (found) setMeasurePoints((prev) => (prev.length >= 2 ? [found.snap] : [...prev, found.snap]));
+      const res = pickMeasureTargetAt(e.clientX, e.clientY);
+      if (res.snap) {
+        const pickedSnap = res.snap.snap;
+        const clickPos = { x: res.snap.x, y: res.snap.y };
+        setMeasurePoints((prev) => {
+          if (prev.length === 1) {
+            setMeasureAnchor(clickPos);
+            return [...prev, pickedSnap];
+          }
+          setMeasureAnchor(null);
+          return [pickedSnap];
+        });
+      } else {
+        // 軌道・スナップ点以外の余白をクリックしたら選択中の計測点を解除
+        setMeasurePoints([]);
+        setMeasureAnchor(null);
+      }
       return;
     }
-    const seg = pickSegmentAt(e.clientX, e.clientY);
-    if (seg) {
-      const idx = compensatedSegments.findIndex((s) => s.id === seg.id);
-      if (idx >= 0) onSelectSegmentIndex(idx, false);
+    const segHit = pickSegmentWithNearestAt(e.clientX, e.clientY, 11.0);
+    if (segHit) {
+      const idx = compensatedSegments.findIndex((s) => s.id === segHit.segment.id);
+      if (idx >= 0) onSelectSegmentIndex(idx + 1, false);
     }
   };
 
@@ -1264,7 +1550,14 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
   }, [measurePoints]);
 
   return (
-    <div className="relative h-full w-full bg-[#141519] overflow-hidden">
+    <div
+      className="relative h-full w-full overflow-hidden"
+      style={{
+        backgroundColor: "#141519",
+        backgroundImage:
+          "radial-gradient(circle at 22% 18%, rgba(56, 189, 248, 0.09), transparent 46%), radial-gradient(circle at 82% 80%, rgba(14, 165, 233, 0.065), transparent 44%)",
+      }}
+    >
       <div
         ref={mountRef}
         className={`h-full w-full ${
@@ -1279,6 +1572,7 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
         onMouseMove={handleMouseMove}
         onMouseLeave={() => {
           setHoverInfo(null);
+          setMeasureHoverSeg(null);
           setSnapHover(null);
           setZoomBox(null);
         }}
@@ -1295,6 +1589,8 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
         onSelectNavMode={(mode) => {
           setMeasureMode(false);
           setMeasurePoints([]);
+          setMeasureAnchor(null);
+          setMeasureHoverSeg(null);
           setSnapHover(null);
           setNavMode(mode);
         }}
@@ -1303,13 +1599,19 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
           setMeasureMode((v) => {
             if (v) {
               setMeasurePoints([]);
+              setMeasureAnchor(null);
+              setMeasureHoverSeg(null);
               setSnapHover(null);
             }
             return !v;
           })
         }
         measurePoints={measurePoints}
-        onClearMeasurePoints={() => setMeasurePoints([])}
+        measureAnchor={measureAnchor}
+        onClearMeasurePoints={() => {
+          setMeasurePoints([]);
+          setMeasureAnchor(null);
+        }}
         measurementStats={measurementStats}
         snapHover={snapHover}
         hoverInfo={hoverInfo}
@@ -1323,14 +1625,20 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
       <TraceBar
         totalSteps={compensatedSegments.length}
         activeSegmentIndex={activeSegmentIndex}
-        currentSegment={compensatedSegments[activeSegmentIndex] ?? null}
+        currentSegment={
+          activeSegmentIndex === 0
+            ? (compensatedSegments[compensatedSegments.length - 1] ?? null)
+            : (compensatedSegments[activeSegmentIndex - 1] ?? null)
+        }
         isPlaying={isPlaying}
         playbackSpeed={playbackSpeed}
+        skipToolChangeTime={skipToolChangeTime}
         breakReason={breakReason}
         liveTimeTextRef={liveTimeTextRef}
         onSelectSegmentIndex={onSelectSegmentIndex}
         onTogglePlay={onTogglePlay}
         onChangePlaybackSpeed={onChangePlaybackSpeed}
+        onToggleSkipToolChangeTime={onToggleSkipToolChangeTime}
       />
     </div>
   );

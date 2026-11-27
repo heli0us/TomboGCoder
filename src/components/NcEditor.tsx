@@ -36,6 +36,7 @@ export interface NcEditorHandle {
   getSelectionInfo: () => EditorSelectionInfo;
   insertAtSelection: (text: string) => boolean;
   appendToEnd: (text: string) => boolean;
+  replaceEntireDocument: (nextText: string) => boolean;
   undo: () => void;
   redo: () => void;
   openSearch: () => void;
@@ -45,6 +46,7 @@ export interface NcEditorHandle {
 interface NcEditorProps {
   value: string;
   onChange: (value: string) => void;
+  fontSize?: number;
   activeLine: number | null;
   diagnostics: Diagnostic[];
   breakpoints: number[];
@@ -273,9 +275,32 @@ const vscodeDarkTheme = EditorView.theme(
   { dark: true },
 );
 
+const JAPANESE_SEARCH_PHRASES = EditorState.phrases.of({
+  Find: "検索文字列",
+  Replace: "置換後文字列",
+  next: "次へ",
+  previous: "前へ",
+  all: "全選択",
+  "match case": "大小区別",
+  regexp: "正規表現",
+  "by word": "単語単位",
+  replace: "置換",
+  "replace all": "全置換",
+  close: "閉じる",
+});
+
 export const NcEditor = forwardRef<NcEditorHandle, NcEditorProps>(
   (
-    { value, onChange, activeLine, diagnostics, breakpoints, onToggleBreakpoint, onLineClick },
+    {
+      value,
+      onChange,
+      fontSize = 13,
+      activeLine,
+      diagnostics,
+      breakpoints,
+      onToggleBreakpoint,
+      onLineClick,
+    },
     ref,
   ) => {
     const containerRef = useRef<HTMLDivElement | null>(null);
@@ -334,6 +359,16 @@ export const NcEditor = forwardRef<NcEditorHandle, NcEditorProps>(
           view.focus();
           return true;
         },
+        replaceEntireDocument: (nextText: string) => {
+          const view = viewRef.current;
+          if (!view) return false;
+          const curLen = view.state.doc.length;
+          view.dispatch({
+            changes: { from: 0, to: curLen, insert: nextText },
+          });
+          view.focus();
+          return true;
+        },
         undo: () => {
           const view = viewRef.current;
           if (!view) return;
@@ -387,6 +422,7 @@ export const NcEditor = forwardRef<NcEditorHandle, NcEditorProps>(
         highlightActiveLineGutter(),
         highlightActiveLine(),
         history(),
+        JAPANESE_SEARCH_PHRASES,
         search({ top: true }),
         keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap]),
         vscodeDarkTheme,
@@ -460,7 +496,13 @@ export const NcEditor = forwardRef<NcEditorHandle, NcEditorProps>(
     view.dispatch({ effects: setBreakpointsEffect.of(breakpoints) });
   }, [breakpoints]);
 
-  return <div ref={containerRef} className="h-full w-full overflow-hidden" />;
+  return (
+    <div
+      ref={containerRef}
+      style={{ "--nc-editor-font-size": `${fontSize}px` } as React.CSSProperties}
+      className="h-full w-full overflow-hidden"
+    />
+  );
   },
 );
 

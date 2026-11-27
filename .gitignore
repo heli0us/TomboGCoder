@@ -5,10 +5,11 @@ src-tauri/target/
 .DS_Store
 *.log
 
-# 現場NCデータの誤コミット防止
+# 現場NCデータ・個人置換ルールの誤コミット防止
 *.nc
 *.NC
 *.dnc
 *.DNC
 *.tap
 *.TAP
+mifes_replace_batches.json

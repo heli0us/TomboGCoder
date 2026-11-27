@@ -4,6 +4,7 @@ import {
   ChevronLast,
   ChevronLeft,
   ChevronRight,
+  FastForward,
   Pause,
   Play,
 } from "lucide-react";
@@ -15,11 +16,13 @@ interface TraceBarProps {
   currentSegment: PathSegment | null;
   isPlaying: boolean;
   playbackSpeed: number;
+  skipToolChangeTime: boolean;
   breakReason: string | null;
   liveTimeTextRef: React.RefObject<HTMLSpanElement | null>;
   onSelectSegmentIndex: (idx: number, keepPlaying?: boolean) => void;
   onTogglePlay: () => void;
   onChangePlaybackSpeed: (speed: number) => void;
+  onToggleSkipToolChangeTime: () => void;
 }
 
 export const TraceBar: React.FC<TraceBarProps> = ({
@@ -28,11 +31,13 @@ export const TraceBar: React.FC<TraceBarProps> = ({
   currentSegment,
   isPlaying,
   playbackSpeed,
+  skipToolChangeTime,
   breakReason,
   liveTimeTextRef,
   onSelectSegmentIndex,
   onTogglePlay,
   onChangePlaybackSpeed,
+  onToggleSkipToolChangeTime,
 }) => {
   return (
     <div className="absolute bottom-3 left-3 right-3 z-20 bg-[#1f2126]/95 border border-[#32363f] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md flex flex-col gap-1.5">
@@ -50,7 +55,7 @@ export const TraceBar: React.FC<TraceBarProps> = ({
             onClick={() => onSelectSegmentIndex(0, false)}
             disabled={totalSteps === 0}
             className="p-1 rounded hover:bg-[#2f333c] text-[#cccccc] disabled:opacity-35 transition-colors"
-            title="先頭へ"
+            title="加工終了後 (全景 0) へ戻す (Esc)"
           >
             <ChevronFirst className="w-4 h-4" />
           </button>
@@ -77,19 +82,19 @@ export const TraceBar: React.FC<TraceBarProps> = ({
           </button>
           <button
             onClick={() =>
-              onSelectSegmentIndex(Math.min(totalSteps - 1, activeSegmentIndex + 1), false)
+              onSelectSegmentIndex(Math.min(totalSteps, activeSegmentIndex + 1), false)
             }
-            disabled={totalSteps === 0 || activeSegmentIndex >= totalSteps - 1}
+            disabled={totalSteps === 0 || activeSegmentIndex >= totalSteps}
             className="p-1 rounded hover:bg-[#2f333c] text-[#cccccc] disabled:opacity-35 transition-colors"
             title="1ブロック進む (→)"
           >
             <ChevronRight className="w-4 h-4" />
           </button>
           <button
-            onClick={() => onSelectSegmentIndex(Math.max(0, totalSteps - 1), false)}
+            onClick={() => onSelectSegmentIndex(totalSteps, false)}
             disabled={totalSteps === 0}
             className="p-1 rounded hover:bg-[#2f333c] text-[#cccccc] disabled:opacity-35 transition-colors"
-            title="終端へ"
+            title="最終ブロックへ"
           >
             <ChevronLast className="w-4 h-4" />
           </button>
@@ -112,21 +117,37 @@ export const TraceBar: React.FC<TraceBarProps> = ({
           <option value={100}>100x (超高速)</option>
         </select>
 
-        {/* シークバー */}
+        {/* 工具交換 (ATC) 待ち時間スキップトグル */}
+        <button
+          onClick={onToggleSkipToolChangeTime}
+          className={`px-2 py-0.5 rounded border text-[10.5px] flex items-center gap-1 shrink-0 transition-colors ${
+            skipToolChangeTime
+              ? "bg-[#094771] border-[#0078d4] text-[#7dd3fc]"
+              : "bg-[#16171b] border-[#32363f] text-[#8e95a2] hover:text-white"
+          }`}
+          title="ONにするとトレース再生中の工具交換(M06)待ち時間をスキップします（サイクルタイム集計には影響しません）"
+        >
+          <FastForward className="w-3 h-3" />
+          <span>ATCスキップ</span>
+        </button>
+
+        {/* シークバー (0=加工終了後の全景, 1..N=加工開始〜各ブロック) */}
         <input
           type="range"
           min={0}
-          max={Math.max(0, totalSteps - 1)}
-          value={Math.min(activeSegmentIndex, Math.max(0, totalSteps - 1))}
+          max={totalSteps}
+          value={Math.min(activeSegmentIndex, totalSteps)}
           onChange={(e) => onSelectSegmentIndex(Number(e.target.value), false)}
           disabled={totalSteps === 0}
           className="flex-1 accent-[#38bdf8] h-1.5 cursor-pointer"
         />
 
         {/* ステップ & リアルタイム経過時間 */}
-        <div className="text-[11px] font-mono text-[#cbd5e1] whitespace-nowrap min-w-[148px] text-right">
+        <div className="text-[11px] font-mono text-[#cbd5e1] whitespace-nowrap min-w-[164px] text-right">
           <span>
-            {totalSteps > 0 ? activeSegmentIndex + 1 : 0} / {totalSteps}
+            {activeSegmentIndex === 0
+              ? `0 / ${totalSteps} (完了)`
+              : `${activeSegmentIndex} / ${totalSteps}`}
           </span>
           <span className="text-[#4b5563] mx-1.5">|</span>
           <span ref={liveTimeTextRef} className="text-[#38bdf8] font-semibold">

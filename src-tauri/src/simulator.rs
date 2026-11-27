@@ -203,6 +203,8 @@ pub fn simulate_nc(source: &str, config: &MachineConfig, file_path: Option<&str>
         source,
         config.optional_block_skip,
         file_path,
+        &config.subprogram_dirs,
+        &config.sim_replace_rules,
         &mut diagnostics,
     );
     let blocks = expanded.blocks;
@@ -550,6 +552,38 @@ fn execute_block(
             length_mm: 0.0,
             duration_sec: config.tool_change_time_sec,
             cumulative_time_sec: 0.0,
+            has_m00: false,
+            modal_state: state.snapshot(effective_tools, effective_diameters),
+        });
+        *seg_id += 1;
+    }
+
+    // 2.5. プログラムストップ (M00) イベント記録（移動のない単独M00行でもブレイク停止できるよう独立セグメント化）
+    if m_codes.contains(&0) {
+        segments.push(PathSegment {
+            id: *seg_id,
+            line_number: block.line_number,
+            raw_line: block.raw_line.clone(),
+            motion_type: MotionType::Dwell,
+            is_compensated: false,
+            comp_mode: state.comp_mode,
+            plane: state.plane,
+            start: state.pos,
+            end: state.pos,
+            arc_center: None,
+            arc_radius: None,
+            arc_cw: None,
+            points: vec![state.pos],
+            tool_number: state.tool_number,
+            d_number: state.d_number,
+            h_number: state.h_number,
+            program_number: state.program_number.clone(),
+            feed_rate: state.feed_rate,
+            spindle_speed: state.spindle_speed,
+            length_mm: 0.0,
+            duration_sec: 0.0,
+            cumulative_time_sec: 0.0,
+            has_m00: true,
             modal_state: state.snapshot(effective_tools, effective_diameters),
         });
         *seg_id += 1;
@@ -574,14 +608,18 @@ fn execute_block(
         return;
     }
     if is_g92 {
+        // FANUC仕様: G92 座標系設定は現在の機械位置を (x + work_offset + local_offset) と一致させる
         if let Some(x) = x_val {
-            state.g92_offset.x = state.pos.x - x * scale;
+            state.g92_offset.x =
+                state.pos.x - (x * scale + state.work_offset.x + state.local_offset.x);
         }
         if let Some(y) = y_val {
-            state.g92_offset.y = state.pos.y - y * scale;
+            state.g92_offset.y =
+                state.pos.y - (y * scale + state.work_offset.y + state.local_offset.y);
         }
         if let Some(z) = z_val {
-            state.g92_offset.z = state.pos.z - z * scale;
+            state.g92_offset.z =
+                state.pos.z - (z * scale + state.work_offset.z + state.local_offset.z);
         }
         return;
     }
@@ -620,6 +658,7 @@ fn execute_block(
                 length_mm: 0.0,
                 duration_sec: sec,
                 cumulative_time_sec: 0.0,
+                has_m00: false,
                 modal_state: state.snapshot(effective_tools, effective_diameters),
             });
             *seg_id += 1;
@@ -834,6 +873,7 @@ fn execute_block(
                         length_mm: len,
                         duration_sec: 0.0,
                         cumulative_time_sec: 0.0,
+                        has_m00: false,
                         modal_state: state.snapshot(effective_tools, effective_diameters),
                     });
                     *seg_id += 1;
@@ -939,6 +979,7 @@ fn push_linear_segment(
         length_mm: len,
         duration_sec: 0.0,
         cumulative_time_sec: 0.0,
+        has_m00: false,
         modal_state: state.snapshot(effective_tools, effective_diameters),
     });
     *seg_id += 1;
@@ -1103,6 +1144,7 @@ fn expand_canned_cycle(
             length_mm: 0.0,
             duration_sec: state.canned_p_sec,
             cumulative_time_sec: 0.0,
+            has_m00: false,
             modal_state: state.snapshot(effective_tools, effective_diameters),
         });
         *seg_id += 1;

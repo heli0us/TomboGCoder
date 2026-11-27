@@ -22,6 +22,12 @@ import {
 
 export type BottomTab = "cycle" | "problems" | "modal" | "macros";
 
+export interface FileStatsSummary {
+  programCount: number;
+  charCountNoNewline: number;
+  lineCount: number;
+}
+
 interface BottomPanelProps {
   activeTab: BottomTab;
   onChangeTab: (tab: BottomTab) => void;
@@ -29,6 +35,7 @@ interface BottomPanelProps {
   heightPx: number;
   onToggleCollapse: () => void;
   parseResult: ParseResult | null;
+  fileStats: FileStatsSummary;
   activeSegment: PathSegment | null;
   programFilterLabel?: string | null;
   onJumpToLine: (lineNumber: number) => void;
@@ -43,6 +50,7 @@ export const BottomPanel: React.FC<BottomPanelProps> = ({
   heightPx,
   onToggleCollapse,
   parseResult,
+  fileStats,
   activeSegment,
   programFilterLabel,
   onJumpToLine,
@@ -190,7 +198,7 @@ export const BottomPanel: React.FC<BottomPanelProps> = ({
         <div className="flex-1 overflow-auto p-3 text-xs">
           {activeTab === "cycle" && ct && (
             <div className="space-y-3">
-              <div className="grid grid-cols-5 gap-2.5">
+              <div className="grid grid-cols-3 lg:grid-cols-6 gap-2.5">
                 <div className="bg-[#252526] border border-[#3c3c3c] rounded p-2">
                   <div className="text-[10.5px] text-[#94a3b8]">総サイクルタイム</div>
                   <div className="text-base font-mono font-bold text-[#38bdf8]">
@@ -227,6 +235,21 @@ export const BottomPanel: React.FC<BottomPanelProps> = ({
                     {bb?.valid
                       ? `${(bb.max.x - bb.min.x).toFixed(1)} × ${(bb.max.y - bb.min.y).toFixed(1)} × ${(bb.max.z - bb.min.z).toFixed(1)}`
                       : "-"}
+                  </div>
+                </div>
+                <div className="bg-[#252526] border border-[#3c3c3c] rounded p-2">
+                  <div className="text-[10.5px] text-[#94a3b8]">プログラム / 文字数</div>
+                  <div className="font-mono text-[11px] text-[#e2e8f0] leading-snug">
+                    <span className="text-[#dcdcaa] font-semibold">
+                      {fileStats.programCount}件
+                    </span>
+                    <span className="text-[#6e7681] mx-1">/</span>
+                    <span className="text-[#9cdcfe]">
+                      {fileStats.charCountNoNewline.toLocaleString()}文字
+                    </span>
+                    <div className="text-[9.5px] text-[#8e95a2]">
+                      改行除く・{fileStats.lineCount.toLocaleString()}行
+                    </div>
                   </div>
                 </div>
               </div>

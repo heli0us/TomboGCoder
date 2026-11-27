@@ -28,6 +28,7 @@ type TopMenuKey = "file" | "edit" | "view" | "machine" | "sim" | "help";
 
 interface TopBarProps {
   isMac: boolean;
+  hasDocument: boolean;
   fileName: string;
   filePath: string | null;
   encoding: string;
@@ -51,8 +52,8 @@ interface TopBarProps {
   onClearRecentFiles: () => void;
   onSaveFile: () => void;
   onSaveAsFile: () => void;
+  onCloseDocument: () => void;
   onToggleEncoding: () => void;
-  onLoadSample: (mode: "plate" | "macro") => void;
   onToggleWatchExternal: () => void;
   onExportCsv: () => void;
   onExportHtml: () => void;
@@ -63,6 +64,7 @@ interface TopBarProps {
   onEditSearch: () => void;
   onEditSelectAll: () => void;
   onInsertExternalFile: () => void;
+  onOpenEditToolsPanel: () => void;
   // 表示系
   onToggleSidebar: () => void;
   onToggleEditor: () => void;
@@ -88,6 +90,7 @@ interface TopBarProps {
 
 export const TopBar: React.FC<TopBarProps> = ({
   isMac,
+  hasDocument,
   fileName,
   filePath,
   encoding,
@@ -110,8 +113,8 @@ export const TopBar: React.FC<TopBarProps> = ({
   onClearRecentFiles,
   onSaveFile,
   onSaveAsFile,
+  onCloseDocument,
   onToggleEncoding,
-  onLoadSample,
   onToggleWatchExternal,
   onExportCsv,
   onExportHtml,
@@ -121,6 +124,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   onEditSearch,
   onEditSelectAll,
   onInsertExternalFile,
+  onOpenEditToolsPanel,
   onToggleSidebar,
   onToggleEditor,
   onToggleBottom,
@@ -377,15 +381,28 @@ export const TopBar: React.FC<TopBarProps> = ({
                     </div>
 
                     <MenuDivider />
-                    <MenuItem label="上書き保存" shortcut={`${mod}S`} onClick={onSaveFile} />
+                    <MenuItem
+                      label="上書き保存"
+                      shortcut={`${mod}S`}
+                      disabled={!hasDocument}
+                      onClick={onSaveFile}
+                    />
                     <MenuItem
                       label="名前を付けて保存..."
                       shortcut={`${mod}Shift+S`}
+                      disabled={!hasDocument}
                       onClick={onSaveAsFile}
                     />
                     <MenuItem
                       label={`文字コード切替 (現在: ${encoding})`}
+                      disabled={!hasDocument}
                       onClick={onToggleEncoding}
+                    />
+                    <MenuItem
+                      label="ファイルを閉じる (スタート画面へ)"
+                      shortcut={`${mod}W`}
+                      disabled={!hasDocument}
+                      onClick={onCloseDocument}
                     />
                     <MenuDivider />
                     <MenuItem
@@ -394,17 +411,17 @@ export const TopBar: React.FC<TopBarProps> = ({
                       disabled={!filePath}
                       onClick={onToggleWatchExternal}
                     />
-                    <MenuItem
-                      label="サンプル：プレート加工デモ"
-                      onClick={() => onLoadSample("plate")}
-                    />
-                    <MenuItem
-                      label="サンプル：カスタムマクロB デモ"
-                      onClick={() => onLoadSample("macro")}
-                    />
                     <MenuDivider />
-                    <MenuItem label="CSV加工レポート出力..." onClick={onExportCsv} />
-                    <MenuItem label="HTML加工レポート出力..." onClick={onExportHtml} />
+                    <MenuItem
+                      label="CSV加工レポート出力..."
+                      disabled={!hasDocument}
+                      onClick={onExportCsv}
+                    />
+                    <MenuItem
+                      label="HTML加工レポート出力..."
+                      disabled={!hasDocument}
+                      onClick={onExportHtml}
+                    />
                     <MenuDivider />
                     <MenuItem
                       label="終了"
@@ -430,6 +447,10 @@ export const TopBar: React.FC<TopBarProps> = ({
                     <MenuItem
                       label="外部NCファイルをカーソルへ挿入..."
                       onClick={onInsertExternalFile}
+                    />
+                    <MenuItem
+                      label="正規表現置換ルール & 定型文パネル..."
+                      onClick={onOpenEditToolsPanel}
                     />
                   </div>
                 )}
@@ -471,10 +492,30 @@ export const TopBar: React.FC<TopBarProps> = ({
                     <MenuItem label="正面図 (XZ)" onClick={() => onCameraPreset("front")} />
                     <MenuItem label="右側面図 (YZ)" onClick={() => onCameraPreset("right")} />
                     <MenuItem
-                      label="4面図 (Quad View)"
-                      checked={displayOptions.quadView}
+                      label="3画面分割 (XY / XZ + 3D)"
+                      checked={displayOptions.viewLayout === "triple"}
                       onClick={() =>
-                        onUpdateDisplayOptions({ quadView: !displayOptions.quadView })
+                        onUpdateDisplayOptions({
+                          viewLayout: displayOptions.viewLayout === "triple" ? "single" : "triple",
+                        })
+                      }
+                    />
+                    <MenuItem
+                      label="4面図 (XY / XZ / YZ + 3D)"
+                      checked={displayOptions.viewLayout === "quad"}
+                      onClick={() =>
+                        onUpdateDisplayOptions({
+                          viewLayout: displayOptions.viewLayout === "quad" ? "single" : "quad",
+                        })
+                      }
+                    />
+                    <MenuItem
+                      label="透過ストック (素材) を表示"
+                      checked={displayOptions.stock.enabled}
+                      onClick={() =>
+                        onUpdateDisplayOptions({
+                          stock: { ...displayOptions.stock, enabled: !displayOptions.stock.enabled },
+                        })
                       }
                     />
                     <MenuDivider />
@@ -630,29 +671,34 @@ export const TopBar: React.FC<TopBarProps> = ({
         onDoubleClick={handleToggleMaximizeWindow}
         className="flex-1 h-full flex items-center justify-center px-3 min-w-0"
       >
-        <div
-          data-tauri-drag-region
-          className="flex items-center gap-2 text-[11.5px] text-[#d4d4d4] font-mono truncate max-w-[380px] bg-[#222224] border border-[#323234] rounded-md px-2.5 py-0.5"
-        >
+        {hasDocument ? (
+          <div
+            data-tauri-drag-region
+            className="flex items-center gap-2 text-[11.5px] text-[#d4d4d4] font-mono truncate max-w-[380px] bg-[#222224] border border-[#323234] rounded-md px-2.5 py-0.5"
+          >
+            <span data-tauri-drag-region className="truncate" title={filePath ?? fileName}>
+              {fileName}
+              {isDirty ? <span className="text-[#fbbf24] ml-1">●</span> : null}
+            </span>
+            <button
+              onClick={onToggleEncoding}
+              className="px-1.5 py-0 rounded bg-[#2d2d30] hover:bg-[#3c3c3c] text-[10px] text-[#9cdcfe] shrink-0 transition-colors"
+              title="クリックして保存時の文字コードを切替 (UTF-8 ⇔ Shift-JIS)"
+            >
+              {encoding}
+            </button>
+            {isParsing && (
+              <span className="text-[#38bdf8] text-[10px] animate-pulse shrink-0">解析中...</span>
+            )}
+          </div>
+        ) : (
           <span
             data-tauri-drag-region
-            className="truncate"
-            title={filePath ?? fileName}
+            className="text-[11.5px] font-medium text-[#7c8594] tracking-tight"
           >
-            {fileName}
-            {isDirty ? <span className="text-[#fbbf24] ml-1">●</span> : null}
+            TomboGCoder
           </span>
-          <button
-            onClick={onToggleEncoding}
-            className="px-1.5 py-0 rounded bg-[#2d2d30] hover:bg-[#3c3c3c] text-[10px] text-[#9cdcfe] shrink-0 transition-colors"
-            title="クリックして保存時の文字コードを切替 (UTF-8 ⇔ Shift-JIS)"
-          >
-            {encoding}
-          </button>
-          {isParsing && (
-            <span className="text-[#38bdf8] text-[10px] animate-pulse shrink-0">解析中...</span>
-          )}
-        </div>
+        )}
       </div>
 
       {/* 右：外部監視・マシン切替トグル・レイアウト3連・Windowsウィンドウ操作 */}

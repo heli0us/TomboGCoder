@@ -145,6 +145,9 @@ pub struct PathSegment {
     pub length_mm: f64,
     pub duration_sec: f64,
     pub cumulative_time_sec: f64,
+    /// M00（プログラムストップ）を含むブロックか
+    #[serde(default)]
+    pub has_m00: bool,
     pub modal_state: ModalSnapshot,
 }
 
@@ -192,6 +195,27 @@ pub struct CycleTimeSummary {
     pub tools: Vec<ToolSummary>,
 }
 
+/// 3Dシミュレーション時のみ適用する特殊Gコード置換ルール
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimReplaceRule {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    pub pattern: String,
+    #[serde(default)]
+    pub replacement: String,
+    #[serde(default)]
+    pub use_regex: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// 機械パラメータおよび補正テーブル設定
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -224,6 +248,12 @@ pub struct MachineConfig {
     pub auto_extract_diameter: bool,
     /// 外角コーナー処理でロールアラウンド円弧を挿入するか（falseなら交点伸長）
     pub corner_arc_roll_around: bool,
+    /// 外部サブプログラム (M98/G65) 検索フォルダ一覧
+    #[serde(default)]
+    pub subprogram_dirs: Vec<String>,
+    /// シミュレーション専用 特殊Gコード置換ルール（外部サブプログラム展開時にも適用）
+    #[serde(default)]
+    pub sim_replace_rules: Vec<SimReplaceRule>,
 }
 
 impl Default for MachineConfig {
@@ -301,6 +331,8 @@ impl Default for MachineConfig {
             optional_block_skip: false,
             auto_extract_diameter: true,
             corner_arc_roll_around: true,
+            subprogram_dirs: Vec::new(),
+            sim_replace_rules: Vec::new(),
         }
     }
 }

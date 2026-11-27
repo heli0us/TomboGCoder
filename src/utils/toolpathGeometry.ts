@@ -8,7 +8,7 @@ import {
   getToolColor,
 } from "../types/nc";
 
-export type SnapKind = "endpoint" | "midpoint" | "center";
+export type SnapKind = "endpoint" | "midpoint" | "center" | "onpath";
 
 export interface SnapPoint {
   pos: Point3;
@@ -23,6 +23,8 @@ export function snapKindLabel(kind: SnapKind): string {
       return "中点";
     case "center":
       return "円弧中心";
+    case "onpath":
+      return "軌道上";
   }
 }
 
@@ -45,6 +47,23 @@ export function getMotionColor(type: MotionType): THREE.Color {
   }
 }
 
+/** 2Dスクリーン空間での点と線分の最短距離と補間パラメータ t (0..1) */
+export function projectToSegment2D(
+  px: number,
+  py: number,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+): { dist: number; t: number } {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq < 1e-6) return { dist: Math.hypot(px - x1, py - y1), t: 0 };
+  const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lenSq));
+  return { dist: Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy)), t };
+}
+
 /** 2Dスクリーン空間での点と線分の最短距離 */
 export function distToSegment2D(
   px: number,
@@ -54,12 +73,39 @@ export function distToSegment2D(
   x2: number,
   y2: number,
 ): number {
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  const lenSq = dx * dx + dy * dy;
-  if (lenSq < 1e-6) return Math.hypot(px - x1, py - y1);
-  const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lenSq));
-  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+  return projectToSegment2D(px, py, x1, y1, x2, y2).dist;
+}
+
+/** 画面上のピクセル半径が常に一定になるよう、カメラ距離に応じてマーカーを相対スケーリング */
+export function updateScreenSpaceMarkers(
+  group: THREE.Group | null,
+  camera: THREE.Camera,
+  viewportHeight: number,
+): void {
+  if (!group || group.children.length === 0) return;
+  const vh = Math.max(1, viewportHeight);
+  const isPersp = camera instanceof THREE.PerspectiveCamera;
+  const tanHalfFov = isPersp ? Math.tan((camera.fov * Math.PI) / 360) : 0;
+  const orthoWorldPerPx =
+    camera instanceof THREE.OrthographicCamera
+      ? (camera.top - camera.bottom) / (Math.max(1e-6, camera.zoom) * vh)
+      : 0;
+  const worldPos = new THREE.Vector3();
+
+  for (const child of group.children) {
+    const px = child.userData?.screenPx as number | undefined;
+    if (!px || px <= 0) continue;
+    let scale: number;
+    if (isPersp) {
+      child.getWorldPosition(worldPos);
+      const dist = Math.max(0.5, camera.position.distanceTo(worldPos));
+      scale = ((2 * dist * tanHalfFov) / vh) * px;
+    } else {
+      scale = orthoWorldPerPx * px;
+    }
+    scale = Math.max(0.05, scale);
+    child.scale.setScalar(scale);
+  }
 }
 
 /** Zスライス条件に一致するかを判定 */
@@ -138,6 +184,23 @@ export function samplePolylineAt(
   return { pos: last, partial };
 }
 
+/** 単一セグメントの特徴スナップ点（端点・実中点・円弧中心）を取得 */
+export function getSegmentSnapPoints(seg: PathSegment): SnapPoint[] {
+  const pts: SnapPoint[] = [
+    { pos: seg.start, kind: "endpoint" },
+    { pos: seg.end, kind: "endpoint" },
+  ];
+  if (seg.points.length >= 2) {
+    // 円弧・直線ともにポリライン上の正確な実中点（円弧なら弧のど真ん中）を算出
+    const mid = samplePolylineAt(seg.points, 0.5).pos;
+    pts.push({ pos: mid, kind: "midpoint" });
+  }
+  if (seg.arcCenter) {
+    pts.push({ pos: seg.arcCenter, kind: "center" });
+  }
+  return pts;
+}
+
 /** セグメント列からスナップ候補点（端点・中点・円弧中心）を抽出 */
 export function extractSnapPoints(segments: PathSegment[]): SnapPoint[] {
   const list: SnapPoint[] = [];
@@ -149,22 +212,10 @@ export function extractSnapPoints(segments: PathSegment[]): SnapPoint[] {
     list.push({ pos, kind });
   };
 
-  const stride = segments.length > 5000 ? Math.ceil(segments.length / 5000) : 1;
+  const stride = segments.length > 20000 ? Math.ceil(segments.length / 20000) : 1;
   for (let i = 0; i < segments.length; i += stride) {
-    const seg = segments[i];
-    addPt(seg.start, "endpoint");
-    addPt(seg.end, "endpoint");
-    if (seg.arcCenter) {
-      addPt(seg.arcCenter, "center");
-    } else {
-      addPt(
-        {
-          x: (seg.start.x + seg.end.x) * 0.5,
-          y: (seg.start.y + seg.end.y) * 0.5,
-          z: (seg.start.z + seg.end.z) * 0.5,
-        },
-        "midpoint",
-      );
+    for (const sp of getSegmentSnapPoints(segments[i])) {
+      addPt(sp.pos, sp.kind);
     }
   }
   return list;
@@ -187,130 +238,332 @@ export function disposeGroupChildren(group: THREE.Group): void {
   }
 }
 
-/** 切削パスから工具径分の幅を持つ塗りつぶしリボンメッシュを構築 */
+/** 切削パスから本家風の工具外周輪郭線（左右オフセット線＋外角円弧＋端点半円／穴底円）を構築 */
 export function buildToolWidthFillMesh(
   segments: PathSegment[],
   colorByTool: boolean,
-): THREE.Mesh | null {
+): THREE.LineSegments | null {
   const positions: number[] = [];
   const colors: number[] = [];
-  const capSides = 10;
+  const maxFloatCount = 600_000 * 3; // 30万線分（60万頂点）上限ガード
 
-  const pushTri = (
+  const pushLine = (
     ax: number,
     ay: number,
     az: number,
     bx: number,
     by: number,
     bz: number,
-    cx: number,
-    cy: number,
-    cz: number,
     col: THREE.Color,
   ) => {
-    positions.push(ax, ay, az, bx, by, bz, cx, cy, cz);
-    colors.push(col.r, col.g, col.b, col.r, col.g, col.b, col.r, col.g, col.b);
+    if (positions.length >= maxFloatCount) return;
+    positions.push(ax, ay, az, bx, by, bz);
+    colors.push(col.r, col.g, col.b, col.r, col.g, col.b);
   };
 
-  const pushCap = (cx: number, cy: number, z: number, r: number, col: THREE.Color) => {
-    for (let k = 0; k < capSides; k++) {
-      const a0 = (k / capSides) * Math.PI * 2;
-      const a1 = ((k + 1) / capSides) * Math.PI * 2;
-      pushTri(
-        cx,
-        cy,
-        z,
-        cx + Math.cos(a0) * r,
-        cy + Math.sin(a0) * r,
-        z,
-        cx + Math.cos(a1) * r,
-        cy + Math.sin(a1) * r,
-        z,
-        col,
-      );
+  const pushArc = (
+    cx: number,
+    cy: number,
+    z: number,
+    r: number,
+    startAng: number,
+    sweepAng: number,
+    col: THREE.Color,
+    segsPerQuarter = 4,
+  ) => {
+    if (Math.abs(sweepAng) < 1e-4) return;
+    const steps = Math.max(
+      1,
+      Math.min(20, Math.ceil((Math.abs(sweepAng) / (Math.PI * 0.5)) * segsPerQuarter)),
+    );
+    let px = cx + Math.cos(startAng) * r;
+    let py = cy + Math.sin(startAng) * r;
+    for (let k = 1; k <= steps; k++) {
+      const a = startAng + (sweepAng * k) / steps;
+      const nx = cx + Math.cos(a) * r;
+      const ny = cy + Math.sin(a) * r;
+      pushLine(px, py, z, nx, ny, z, col);
+      px = nx;
+      py = ny;
     }
+  };
+
+  const pushCircle = (cx: number, cy: number, z: number, r: number, col: THREE.Color) => {
+    const sides = 20;
+    let px = cx + r;
+    let py = cy;
+    for (let k = 1; k <= sides; k++) {
+      const a = (k / sides) * Math.PI * 2;
+      const nx = cx + Math.cos(a) * r;
+      const ny = cy + Math.sin(a) * r;
+      pushLine(px, py, z, nx, ny, z, col);
+      px = nx;
+      py = ny;
+    }
+  };
+
+  interface Step2D {
+    p0: Point3;
+    p1: Point3;
+    len: number;
+    tx: number;
+    ty: number;
+    nx: number;
+    ny: number;
+    skipLeft: boolean;
+    skipRight: boolean;
+  }
+
+  let chain: Step2D[] = [];
+  let chainRadius = 0;
+  let chainColor = new THREE.Color("#a78bfa");
+
+  const flushChain = () => {
+    const n = chain.length;
+    if (n === 0) return;
+
+    const r = chainRadius;
+    const col = chainColor;
+    const first = chain[0];
+    const last = chain[n - 1];
+    const isClosed =
+      n >= 2 &&
+      Math.hypot(last.p1.x - first.p0.x, last.p1.y - first.p0.y) < 1e-3 &&
+      Math.abs(last.p1.z - first.p0.z) < 1e-3;
+
+    const lStartTrim = new Float64Array(n);
+    const lEndTrim = new Float64Array(n);
+    const rStartTrim = new Float64Array(n);
+    const rEndTrim = new Float64Array(n);
+
+    const jointCount = isClosed ? n : n - 1;
+    for (let j = 0; j < jointCount; j++) {
+      const nextIdx = (j + 1) % n;
+      const a = chain[j];
+      const b = chain[nextIdx];
+      const cross = a.tx * b.ty - a.ty * b.tx;
+      const dot = a.tx * b.tx + a.ty * b.ty;
+      const ang = Math.atan2(cross, dot); // +: 左折, -: 右折
+      const jz = a.p1.z - 0.015;
+
+      // 左側 (+N) のコーナー処理
+      if (!a.skipLeft && !b.skipLeft) {
+        if (ang < -0.02) {
+          // 右折 → 左側が外角：工具半径Rのロールアラウンド円弧で繋ぐ
+          const startAng = Math.atan2(a.ny, a.nx);
+          pushArc(a.p1.x, a.p1.y, jz, r, startAng, ang, col);
+        } else if (ang > 0.02) {
+          // 左折 → 左側が内角：交点トリムで飛び出しを除去
+          const trim = ang < Math.PI * 0.85 ? r * Math.tan(ang * 0.5) : Infinity;
+          if (trim <= a.len * 0.49 && trim <= b.len * 0.49) {
+            lEndTrim[j] = Math.max(lEndTrim[j], trim);
+            lStartTrim[nextIdx] = Math.max(lStartTrim[nextIdx], trim);
+          }
+        }
+      }
+
+      // 右側 (-N) のコーナー処理
+      if (!a.skipRight && !b.skipRight) {
+        if (ang > 0.02) {
+          // 左折 → 右側が外角：工具半径Rのロールアラウンド円弧で繋ぐ
+          const startAng = Math.atan2(-a.ny, -a.nx);
+          pushArc(a.p1.x, a.p1.y, jz, r, startAng, ang, col);
+        } else if (ang < -0.02) {
+          // 右折 → 右側が内角：交点トリムで飛び出しを除去
+          const absAng = -ang;
+          const trim = absAng < Math.PI * 0.85 ? r * Math.tan(absAng * 0.5) : Infinity;
+          if (trim <= a.len * 0.49 && trim <= b.len * 0.49) {
+            rEndTrim[j] = Math.max(rEndTrim[j], trim);
+            rStartTrim[nextIdx] = Math.max(rStartTrim[nextIdx], trim);
+          }
+        }
+      }
+    }
+
+    // 各区間の左右平行オフセット線を描画
+    for (let i = 0; i < n; i++) {
+      const s = chain[i];
+      const invLen = 1 / s.len;
+      const dz = s.p1.z - s.p0.z;
+
+      if (!s.skipLeft) {
+        const t0 = lStartTrim[i];
+        const t1 = lEndTrim[i];
+        if (t0 + t1 < s.len - 1e-4) {
+          const u0 = t0 * invLen;
+          const u1 = 1 - t1 * invLen;
+          pushLine(
+            s.p0.x + s.nx * r + s.tx * t0,
+            s.p0.y + s.ny * r + s.ty * t0,
+            s.p0.z + dz * u0 - 0.015,
+            s.p1.x + s.nx * r - s.tx * t1,
+            s.p1.y + s.ny * r - s.ty * t1,
+            s.p0.z + dz * u1 - 0.015,
+            col,
+          );
+        }
+      }
+
+      if (!s.skipRight) {
+        const t0 = rStartTrim[i];
+        const t1 = rEndTrim[i];
+        if (t0 + t1 < s.len - 1e-4) {
+          const u0 = t0 * invLen;
+          const u1 = 1 - t1 * invLen;
+          pushLine(
+            s.p0.x - s.nx * r + s.tx * t0,
+            s.p0.y - s.ny * r + s.ty * t0,
+            s.p0.z + dz * u0 - 0.015,
+            s.p1.x - s.nx * r - s.tx * t1,
+            s.p1.y - s.ny * r - s.ty * t1,
+            s.p0.z + dz * u1 - 0.015,
+            col,
+          );
+        }
+      }
+    }
+
+    // 開いたパスの両端に工具半径Rの半円アークを描く
+    if (!isClosed) {
+      const startAng = Math.atan2(first.ny, first.nx);
+      pushArc(first.p0.x, first.p0.y, first.p0.z - 0.015, r, startAng, Math.PI, col, 6);
+
+      const endAng = Math.atan2(-last.ny, -last.nx);
+      pushArc(last.p1.x, last.p1.y, last.p1.z - 0.015, r, endAng, Math.PI, col, 6);
+    }
+
+    chain = [];
   };
 
   let segCount = 0;
-  for (const seg of segments) {
-    if (
-      seg.motionType !== "linear" &&
-      seg.motionType !== "arc_cw" &&
-      seg.motionType !== "arc_ccw"
-    ) {
+  const drawnHoles = new Set<string>();
+
+  for (let sIdx = 0; sIdx < segments.length; sIdx++) {
+    const seg = segments[sIdx];
+    const isCutXY =
+      seg.motionType === "linear" ||
+      seg.motionType === "arc_cw" ||
+      seg.motionType === "arc_ccw";
+    const isCanned = seg.motionType === "canned_feed";
+
+    if (!isCutXY && !isCanned) {
+      flushChain();
       continue;
     }
-    if (++segCount > 12000) break;
+    if (++segCount > 30000) break;
 
     const dia = seg.modalState.toolDiameter > 0 ? seg.modalState.toolDiameter : 6.0;
     const r = dia * 0.5;
     const col = colorByTool
       ? new THREE.Color(getToolColor(seg.toolNumber))
-      : new THREE.Color("#38bdf8");
+      : new THREE.Color("#a78bfa");
+
+    // 固定サイクル穴あけ（G81/G83/G84等）：穴底に工具径の真円リングを描画
+    if (isCanned) {
+      flushChain();
+      const holeKey = `${seg.end.x.toFixed(2)},${seg.end.y.toFixed(2)},${seg.end.z.toFixed(2)},${r.toFixed(2)}`;
+      if (!drawnHoles.has(holeKey)) {
+        drawnHoles.add(holeKey);
+        pushCircle(seg.end.x, seg.end.y, seg.end.z - 0.015, r, col);
+      }
+      continue;
+    }
+
+    // 小径円弧の内側が工具半径より小さい場合、裏返り線を防止
+    let skipLeft = false;
+    let skipRight = false;
+    if (seg.arcCenter && (seg.motionType === "arc_ccw" || seg.motionType === "arc_cw")) {
+      const arcR = Math.hypot(seg.start.x - seg.arcCenter.x, seg.start.y - seg.arcCenter.y);
+      if (arcR <= r + 0.05) {
+        if (seg.motionType === "arc_ccw") skipLeft = true;
+        else skipRight = true;
+      }
+    }
+
+    // 工具径または色が変わったらチェインを区切る
+    if (
+      chain.length > 0 &&
+      (Math.abs(chainRadius - r) > 1e-4 || !chainColor.equals(col))
+    ) {
+      flushChain();
+    }
 
     const pts = seg.points;
-    let drewAny = false;
+    let hadHorizontalStep = false;
+
     for (let i = 0; i < pts.length - 1; i++) {
       const p0 = pts[i];
       const p1 = pts[i + 1];
       const dx = p1.x - p0.x;
       const dy = p1.y - p0.y;
       const len = Math.hypot(dx, dy);
-      if (len < 1e-4) continue;
-      drewAny = true;
+      if (len < 1e-4) {
+        flushChain();
+        continue;
+      }
+      hadHorizontalStep = true;
 
-      const nx = (-dy / len) * r;
-      const ny = (dx / len) * r;
-      const z0 = p0.z - 0.03;
-      const z1 = p1.z - 0.03;
+      if (chain.length > 0) {
+        const prev = chain[chain.length - 1];
+        const gap = Math.hypot(p0.x - prev.p1.x, p0.y - prev.p1.y, p0.z - prev.p1.z);
+        if (gap > 1e-3) {
+          flushChain();
+        }
+      }
 
-      pushTri(
-        p0.x + nx,
-        p0.y + ny,
-        z0,
-        p0.x - nx,
-        p0.y - ny,
-        z0,
-        p1.x + nx,
-        p1.y + ny,
-        z1,
-        col,
-      );
-      pushTri(
-        p0.x - nx,
-        p0.y - ny,
-        z0,
-        p1.x - nx,
-        p1.y - ny,
-        z1,
-        p1.x + nx,
-        p1.y + ny,
-        z1,
-        col,
-      );
+      if (chain.length === 0) {
+        chainRadius = r;
+        chainColor = col;
+      }
+
+      const tx = dx / len;
+      const ty = dy / len;
+      chain.push({
+        p0,
+        p1,
+        len,
+        tx,
+        ty,
+        nx: -ty,
+        ny: tx,
+        skipLeft,
+        skipRight,
+      });
     }
 
-    if (drewAny) {
-      const ps = pts[0];
-      const pe = pts[pts.length - 1];
-      pushCap(ps.x, ps.y, ps.z - 0.03, r, col);
-      pushCap(pe.x, pe.y, pe.z - 0.03, r, col);
+    // 独立した垂直プランジ（G01 Z-xx 単体でその後にXY切削が続かない穴あけマクロ等）
+    if (!hadHorizontalStep && seg.end.z < seg.start.z - 1e-4) {
+      const nextSeg = segments[sIdx + 1];
+      const nextStartsHorizontalHere =
+        nextSeg &&
+        (nextSeg.motionType === "linear" ||
+          nextSeg.motionType === "arc_cw" ||
+          nextSeg.motionType === "arc_ccw") &&
+        Math.hypot(nextSeg.start.x - seg.end.x, nextSeg.start.y - seg.end.y) < 1e-3 &&
+        Math.hypot(nextSeg.end.x - nextSeg.start.x, nextSeg.end.y - nextSeg.start.y) > 1e-3;
+      if (!nextStartsHorizontalHere) {
+        const holeKey = `${seg.end.x.toFixed(2)},${seg.end.y.toFixed(2)},${seg.end.z.toFixed(2)},${r.toFixed(2)}`;
+        if (!drawnHoles.has(holeKey)) {
+          drawnHoles.add(holeKey);
+          pushCircle(seg.end.x, seg.end.y, seg.end.z - 0.015, r, col);
+        }
+      }
     }
   }
+
+  flushChain();
 
   if (positions.length === 0) return null;
 
   const geom = new THREE.BufferGeometry();
   geom.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
   geom.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-  const mat = new THREE.MeshBasicMaterial({
+  const mat = new THREE.LineBasicMaterial({
     vertexColors: true,
     transparent: true,
-    opacity: 0.2,
-    side: THREE.DoubleSide,
-    depthWrite: false,
+    opacity: 0.68,
   });
-  return new THREE.Mesh(geom, mat);
+  return new THREE.LineSegments(geom, mat);
 }
 
 /** T番号の工具径と工具形状に応じた 3D工具メッシュを構築 */

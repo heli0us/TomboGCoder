@@ -3,17 +3,20 @@ import {
   CopyPlus,
   Download,
   FolderDown,
+  FolderPlus,
   Plus,
   RotateCcw,
   Sparkles,
   Trash2,
   Upload,
 } from "lucide-react";
+import { openFolderDialog } from "../../services/ncApi";
 import {
   BUILTIN_TOOL_PRESETS,
   type MachineConfig,
   type MachineProfile,
   type ParseResult,
+  type SimReplaceRule,
   type ToolShape,
   type ToolSpec,
   getToolColor,
@@ -47,7 +50,7 @@ export const MachineProfilePanel: React.FC<MachineProfilePanelProps> = ({
   onExportAllProfiles,
   onImportProfiles,
 }) => {
-  const [subTab, setSubTab] = useState<"t" | "d" | "spec">("t");
+  const [subTab, setSubTab] = useState<"t" | "d" | "spec" | "sim">("t");
   const [newMachineName, setNewMachineName] = useState("");
   const [showCreateForm, setShowCreateForm] = useState(false);
 
@@ -57,8 +60,71 @@ export const MachineProfilePanel: React.FC<MachineProfilePanelProps> = ({
   const [newTName, setNewTName] = useState("");
   const [newDNum, setNewDNum] = useState("");
   const [newDia, setNewDia] = useState("10.0");
+  const [confirmClearT, setConfirmClearT] = useState(false);
+  const [confirmClearD, setConfirmClearD] = useState(false);
+
+  // Sim置換ルール追加フォーム
+  const [newSimName, setNewSimName] = useState("");
+  const [newSimPattern, setNewSimPattern] = useState("");
+  const [newSimReplacement, setNewSimReplacement] = useState("");
+  const [newSimRegex, setNewSimRegex] = useState(false);
+  // サブフォルダ手動入力
+  const [newSubDir, setNewSubDir] = useState("");
 
   const config = activeProfile.config;
+  const subDirs = config.subprogramDirs ?? [];
+  const simRules = config.simReplaceRules ?? [];
+
+  const handlePickSubDir = async () => {
+    const dir = await openFolderDialog("サブプログラム (M98/G65) 検索フォルダを選択");
+    if (!dir || subDirs.includes(dir)) return;
+    onUpdateActiveConfig({ ...config, subprogramDirs: [...subDirs, dir] });
+  };
+
+  const handleAddSubDirManual = () => {
+    const trimmed = newSubDir.trim();
+    if (!trimmed || subDirs.includes(trimmed)) return;
+    onUpdateActiveConfig({ ...config, subprogramDirs: [...subDirs, trimmed] });
+    setNewSubDir("");
+  };
+
+  const handleRemoveSubDir = (dir: string) => {
+    onUpdateActiveConfig({
+      ...config,
+      subprogramDirs: subDirs.filter((d) => d !== dir),
+    });
+  };
+
+  const handleAddSimRule = () => {
+    const pat = newSimPattern.trim();
+    if (!pat) return;
+    const rule: SimReplaceRule = {
+      id: `sim-rule-${Date.now()}`,
+      name: newSimName.trim() || `${pat} → ${newSimReplacement}`,
+      pattern: pat,
+      replacement: newSimReplacement,
+      useRegex: newSimRegex,
+      enabled: true,
+    };
+    onUpdateActiveConfig({ ...config, simReplaceRules: [...simRules, rule] });
+    setNewSimName("");
+    setNewSimPattern("");
+    setNewSimReplacement("");
+  };
+
+  const handleUpdateSimRule = (id: string, patch: Partial<SimReplaceRule>) => {
+    onUpdateActiveConfig({
+      ...config,
+      simReplaceRules: simRules.map((r) => (r.id === id ? { ...r, ...patch } : r)),
+    });
+  };
+
+  const handleDeleteSimRule = (id: string) => {
+    onUpdateActiveConfig({
+      ...config,
+      simReplaceRules: simRules.filter((r) => r.id !== id),
+    });
+  };
 
   const setToolSpec = (tNum: number, patch: Partial<ToolSpec>) => {
     const baseTools: Record<number, ToolSpec> = { ...config.tools };
@@ -92,6 +158,24 @@ export const MachineProfilePanel: React.FC<MachineProfilePanelProps> = ({
     });
     setNewTNum("");
     setNewTName("");
+  };
+
+  const deleteToolSpec = (tNum: number) => {
+    if (config.tools[tNum] === undefined) return;
+    const nextTools: Record<number, ToolSpec> = { ...config.tools };
+    delete nextTools[tNum];
+    onUpdateActiveConfig({
+      ...config,
+      tools: nextTools,
+    });
+  };
+
+  const clearAllTools = () => {
+    onUpdateActiveConfig({
+      ...config,
+      tools: {},
+    });
+    setConfirmClearT(false);
   };
 
   const applyToolTemplate = (templateId: string) => {
@@ -136,6 +220,24 @@ export const MachineProfilePanel: React.FC<MachineProfilePanelProps> = ({
     if (!Number.isFinite(dn) || dn <= 0 || !Number.isFinite(dia) || dia < 0) return;
     setDiameter(dn, dia);
     setNewDNum("");
+  };
+
+  const deleteDiameter = (dNum: number) => {
+    if (config.toolDiameters[dNum] === undefined) return;
+    const nextDiameters: Record<number, number> = { ...config.toolDiameters };
+    delete nextDiameters[dNum];
+    onUpdateActiveConfig({
+      ...config,
+      toolDiameters: nextDiameters,
+    });
+  };
+
+  const clearAllDiameters = () => {
+    onUpdateActiveConfig({
+      ...config,
+      toolDiameters: {},
+    });
+    setConfirmClearD(false);
   };
 
   const allTNumbers = Array.from(
@@ -204,7 +306,11 @@ export const MachineProfilePanel: React.FC<MachineProfilePanelProps> = ({
 
         <select
           value={activeProfile.id}
-          onChange={(e) => onSelectProfile(e.target.value)}
+          onChange={(e) => {
+            setConfirmClearT(false);
+            setConfirmClearD(false);
+            onSelectProfile(e.target.value);
+          }}
           className="w-full bg-[#252526] border border-[#3c3c3c] rounded px-2 py-1 text-xs text-[#f1f5f9] focus:outline-none focus:border-[#0078d4]"
         >
           <optgroup label="標準マシン">
@@ -288,19 +394,24 @@ export const MachineProfilePanel: React.FC<MachineProfilePanelProps> = ({
         </div>
       </section>
 
-      {/* 3連サブタブ：T工具 / D径補正 / 機械仕様 */}
-      <div className="grid grid-cols-3 bg-[#1e1e1e] border border-[#2f2f32] rounded-md p-0.5 text-[11px]">
+      {/* 4連サブタブ：T工具 / D径補正 / 機械仕様 / Sim置換 */}
+      <div className="grid grid-cols-4 bg-[#1e1e1e] border border-[#2f2f32] rounded-md p-0.5 text-[10.5px]">
         {(
           [
-            ["t", `T 工具 (${allTNumbers.length})`],
-            ["d", `D 補正 (${allDNumbers.length})`],
-            ["spec", "機械仕様"],
+            ["t", `T(${allTNumbers.length})`],
+            ["d", `D(${allDNumbers.length})`],
+            ["spec", "仕様"],
+            ["sim", `Sim置換${simRules.filter((r) => r.enabled).length > 0 ? `(${simRules.filter((r) => r.enabled).length})` : ""}`],
           ] as const
         ).map(([tab, label]) => (
           <button
             key={tab}
-            onClick={() => setSubTab(tab)}
-            className={`py-1 rounded font-semibold transition-colors ${
+            onClick={() => {
+              setSubTab(tab);
+              setConfirmClearT(false);
+              setConfirmClearD(false);
+            }}
+            className={`py-1 rounded font-semibold transition-colors truncate px-0.5 ${
               subTab === tab
                 ? "bg-[#0078d4] text-white shadow-sm"
                 : "text-[#8e95a2] hover:text-white"
@@ -329,6 +440,32 @@ export const MachineProfilePanel: React.FC<MachineProfilePanelProps> = ({
               />
               <span>NCコメント自動抽出を優先</span>
             </label>
+            {Object.keys(config.tools).length > 0 &&
+              (confirmClearT ? (
+                <div className="flex items-center gap-1 text-[10px]">
+                  <button
+                    onClick={clearAllTools}
+                    className="px-1.5 py-0.5 rounded bg-[#b91c1c] hover:bg-[#dc2626] text-white font-semibold"
+                    title="このマシンに登録された全T工具を削除します"
+                  >
+                    全削除実行
+                  </button>
+                  <button
+                    onClick={() => setConfirmClearT(false)}
+                    className="px-1 py-0.5 rounded bg-[#2d2d30] hover:bg-[#3e3e42] text-[#cbd5e1]"
+                  >
+                    取消
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setConfirmClearT(true)}
+                  className="text-[10.5px] text-[#8e95a2] hover:text-[#f87171] flex items-center gap-0.5 shrink-0"
+                  title="登録済みT工具をすべて削除"
+                >
+                  <Trash2 className="w-3 h-3" /> 全削除
+                </button>
+              ))}
           </div>
 
           {/* 定番工具セット流し込み */}
@@ -348,6 +485,11 @@ export const MachineProfilePanel: React.FC<MachineProfilePanelProps> = ({
           </select>
 
           <div className="space-y-1.5">
+            {allTNumbers.length === 0 && (
+              <p className="text-[11px] text-[#787878] px-1 py-2 text-center">
+                登録された工具はありません（下のフォームから追加できます）
+              </p>
+            )}
             {allTNumbers.map((tNum) => {
               const manualSpec = config.tools[tNum];
               const extractedSpec = parseResult?.extractedTools?.[tNum];
@@ -356,6 +498,7 @@ export const MachineProfilePanel: React.FC<MachineProfilePanelProps> = ({
                 ? extractedSpec
                 : (manualSpec ?? { diameter: 6.0, shape: "endmill", name: "" });
               const isUsed = parseResult?.detectedTools.includes(tNum);
+              const canDelete = manualSpec !== undefined;
 
               return (
                 <div
@@ -379,17 +522,37 @@ export const MachineProfilePanel: React.FC<MachineProfilePanelProps> = ({
                         </span>
                       )}
                     </div>
-                    <select
-                      value={spec.shape}
-                      onChange={(e) => setToolSpec(tNum, { shape: e.target.value as ToolShape })}
-                      className="bg-[#252526] border border-[#3c3c3c] rounded px-1.5 py-0.5 text-[10.5px] text-[#e2e8f0] focus:outline-none focus:border-[#0078d4]"
-                    >
-                      <option value="endmill">フラットEM</option>
-                      <option value="ball">ボールEM</option>
-                      <option value="drill">ドリル</option>
-                      <option value="chamfer">面取/センター</option>
-                      <option value="tap">タップ</option>
-                    </select>
+                    <div className="flex items-center gap-1">
+                      <select
+                        value={spec.shape}
+                        onChange={(e) => setToolSpec(tNum, { shape: e.target.value as ToolShape })}
+                        className="bg-[#252526] border border-[#3c3c3c] rounded px-1.5 py-0.5 text-[10.5px] text-[#e2e8f0] focus:outline-none focus:border-[#0078d4]"
+                      >
+                        <option value="endmill">フラットEM</option>
+                        <option value="ball">ボールEM</option>
+                        <option value="drill">ドリル</option>
+                        <option value="chamfer">面取/センター</option>
+                        <option value="tap">タップ</option>
+                      </select>
+                      <button
+                        onClick={() => deleteToolSpec(tNum)}
+                        disabled={!canDelete}
+                        className={`p-1 rounded transition-colors ${
+                          canDelete
+                            ? "text-[#8e95a2] hover:text-[#f87171] hover:bg-[#2d2d30]"
+                            : "text-[#4b5563] opacity-40 cursor-not-allowed"
+                        }`}
+                        title={
+                          canDelete
+                            ? isUsed || extractedSpec !== undefined
+                              ? `T${String(tNum).padStart(2, "0")} のマシン登録を削除（NC検出値は残ります）`
+                              : `T${String(tNum).padStart(2, "0")} を削除`
+                            : "NCプログラムから自動検出された工具（マシン登録なし）"
+                        }
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
 
                   <div className="grid grid-cols-[72px_1fr] gap-1.5 items-center">
@@ -482,27 +645,61 @@ export const MachineProfilePanel: React.FC<MachineProfilePanelProps> = ({
             G41/G42 径補正のオフセット径（mm）。未登録D番号は同番号の T工具径へ自動フォールバックされます。
           </div>
 
-          <label className="flex items-center gap-2 cursor-pointer px-1 text-[11px]">
-            <input
-              type="checkbox"
-              checked={config.cornerArcRollAround}
-              onChange={(e) =>
-                onUpdateActiveConfig({
-                  ...config,
-                  cornerArcRollAround: e.target.checked,
-                })
-              }
-              className="accent-[#0078d4]"
-            />
-            <span>外角コーナーにロールアラウンド円弧を挿入</span>
-          </label>
+          <div className="flex items-center justify-between gap-2 px-1">
+            <label className="flex items-center gap-2 cursor-pointer text-[11px]">
+              <input
+                type="checkbox"
+                checked={config.cornerArcRollAround}
+                onChange={(e) =>
+                  onUpdateActiveConfig({
+                    ...config,
+                    cornerArcRollAround: e.target.checked,
+                  })
+                }
+                className="accent-[#0078d4]"
+              />
+              <span>外角コーナーにロールアラウンド円弧</span>
+            </label>
+            {Object.keys(config.toolDiameters).length > 0 &&
+              (confirmClearD ? (
+                <div className="flex items-center gap-1 text-[10px] shrink-0">
+                  <button
+                    onClick={clearAllDiameters}
+                    className="px-1.5 py-0.5 rounded bg-[#b91c1c] hover:bg-[#dc2626] text-white font-semibold"
+                    title="このマシンに登録された全D補正を削除します"
+                  >
+                    全削除実行
+                  </button>
+                  <button
+                    onClick={() => setConfirmClearD(false)}
+                    className="px-1 py-0.5 rounded bg-[#2d2d30] hover:bg-[#3e3e42] text-[#cbd5e1]"
+                  >
+                    取消
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setConfirmClearD(true)}
+                  className="text-[10.5px] text-[#8e95a2] hover:text-[#f87171] flex items-center gap-0.5 shrink-0"
+                  title="登録済みD補正をすべて削除"
+                >
+                  <Trash2 className="w-3 h-3" /> 全削除
+                </button>
+              ))}
+          </div>
 
           <div className="space-y-1.5">
-            <div className="grid grid-cols-[64px_1fr_54px] gap-2 text-[10.5px] text-[#858585] px-1">
+            <div className="grid grid-cols-[54px_1fr_48px_20px] gap-1.5 text-[10.5px] text-[#858585] px-1">
               <span>補正番号</span>
               <span>補正直径 (mm)</span>
               <span className="text-right">半径R</span>
+              <span />
             </div>
+            {allDNumbers.length === 0 && (
+              <p className="text-[11px] text-[#787878] px-1 py-2 text-center">
+                登録された径補正はありません（下のフォームから追加できます）
+              </p>
+            )}
             {allDNumbers.map((dNum) => {
               const manualVal = config.toolDiameters[dNum];
               const extractedVal = parseResult?.extractedToolDiameters[dNum];
@@ -511,11 +708,12 @@ export const MachineProfilePanel: React.FC<MachineProfilePanelProps> = ({
                 ? extractedVal
                 : (manualVal ?? config.tools[dNum]?.diameter ?? 0);
               const isUsed = parseResult?.detectedDNumbers.includes(dNum);
+              const canDelete = manualVal !== undefined;
 
               return (
                 <div
                   key={dNum}
-                  className={`grid grid-cols-[64px_1fr_54px] items-center gap-2 px-1.5 py-1 rounded border ${
+                  className={`grid grid-cols-[54px_1fr_48px_20px] items-center gap-1.5 px-1.5 py-1 rounded border ${
                     isUsed
                       ? "bg-[#1e1e1e] border-[#0078d4]/60"
                       : "bg-[#1e1e1e]/60 border-[#2c2c2e]"
@@ -542,6 +740,24 @@ export const MachineProfilePanel: React.FC<MachineProfilePanelProps> = ({
                   <span className="font-mono text-[11px] text-[#94a3b8] text-right">
                     R{(effectiveVal / 2).toFixed(2)}
                   </span>
+                  <button
+                    onClick={() => deleteDiameter(dNum)}
+                    disabled={!canDelete}
+                    className={`p-0.5 rounded flex items-center justify-center transition-colors ${
+                      canDelete
+                        ? "text-[#8e95a2] hover:text-[#f87171] hover:bg-[#2d2d30]"
+                        : "text-[#4b5563] opacity-40 cursor-not-allowed"
+                    }`}
+                    title={
+                      canDelete
+                        ? isUsed || extractedVal !== undefined
+                          ? `D${String(dNum).padStart(2, "0")} のマシン登録を削除（NC検出値は残ります）`
+                          : `D${String(dNum).padStart(2, "0")} を削除`
+                        : "NCプログラムから自動検出された補正番号（マシン登録なし）"
+                    }
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
                 </div>
               );
             })}
@@ -638,6 +854,200 @@ export const MachineProfilePanel: React.FC<MachineProfilePanelProps> = ({
             />
             <span>オプショナルブロックスキップ (`/`) 有効</span>
           </label>
+
+          {/* サブプログラム呼び出しフォルダ (M98/G65) */}
+          <div className="pt-2.5 border-t border-[#2b2b2b] space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[10.5px] font-semibold text-[#9cdcfe] uppercase tracking-wider">
+                サブプログラム検索フォルダ
+              </span>
+              <button
+                onClick={handlePickSubDir}
+                className="text-[10.5px] text-[#38bdf8] hover:underline flex items-center gap-1"
+                title="外部サブプログラム (M98/G65) の検索先フォルダを追加"
+              >
+                <FolderPlus className="w-3 h-3" /> フォルダ選択
+              </button>
+            </div>
+            <p className="text-[10px] text-[#787878] leading-snug">
+              M98/G65 の呼出先が同ファイルに無い場合、元ファイルと同階層に加えて以下のフォルダを検索します。
+            </p>
+            {subDirs.length > 0 && (
+              <div className="space-y-1">
+                {subDirs.map((dir) => (
+                  <div
+                    key={dir}
+                    className="flex items-center justify-between gap-1.5 px-2 py-1 rounded bg-[#1e1e1e] border border-[#2f2f32] text-[10.5px] font-mono"
+                    title={dir}
+                  >
+                    <span className="truncate text-[#cbd5e1]">{dir}</span>
+                    <button
+                      onClick={() => handleRemoveSubDir(dir)}
+                      className="text-[#8e95a2] hover:text-[#f87171] shrink-0"
+                      title="フォルダを削除"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex items-center gap-1">
+              <input
+                type="text"
+                placeholder="フォルダパスを手入力..."
+                value={newSubDir}
+                onChange={(e) => setNewSubDir(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleAddSubDirManual();
+                }}
+                className="flex-1 min-w-0 bg-[#1e1e1e] border border-[#3c3c3c] rounded px-2 py-1 font-mono text-[10.5px] text-white focus:outline-none focus:border-[#0078d4]"
+              />
+              <button
+                onClick={handleAddSubDirManual}
+                disabled={!newSubDir.trim()}
+                className="px-2 py-1 rounded bg-[#0078d4] hover:bg-[#1a8ad4] disabled:opacity-40 text-white"
+                title="パスを追加"
+              >
+                <Plus className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* サブタブ4：3Dシミュレーション専用 特殊Gコード置換 */}
+      {subTab === "sim" && (
+        <div className="space-y-2.5">
+          <div className="text-[10.5px] text-[#8e95a2] leading-relaxed bg-[#1e1e1e] border border-[#2f2f32] rounded-md p-2">
+            元のNCファイルは書き換えず、3D解析・シミュレーション時のみ内部で特殊Gコードを置換します（例：<code className="text-[#9cdcfe]">G91X650.Y-99.5</code> → <code className="text-[#4ade80]">G91X0.Y0.</code>）。
+          </div>
+
+          {simRules.length === 0 ? (
+            <p className="text-[11px] text-[#787878] px-1">
+              登録されたシミュレーション置換ルールはありません
+            </p>
+          ) : (
+            <div className="space-y-1.5">
+              {simRules.map((rule) => (
+                <div
+                  key={rule.id}
+                  className={`p-2 rounded-md border space-y-1.5 ${
+                    rule.enabled
+                      ? "bg-[#1e1e1e] border-[#0078d4]/60"
+                      : "bg-[#19191b] border-[#2a2a2d] opacity-60"
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-1.5">
+                    <label className="flex items-center gap-1.5 min-w-0 flex-1 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={rule.enabled}
+                        onChange={(e) =>
+                          handleUpdateSimRule(rule.id, { enabled: e.target.checked })
+                        }
+                        className="accent-[#0078d4]"
+                      />
+                      <span className="text-[11px] font-medium text-[#e2e8f0] truncate">
+                        {rule.name}
+                      </span>
+                    </label>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        onClick={() =>
+                          handleUpdateSimRule(rule.id, { useRegex: !rule.useRegex })
+                        }
+                        className={`px-1 py-0 rounded text-[9.5px] font-mono border ${
+                          rule.useRegex
+                            ? "bg-[#094771] border-[#0078d4] text-[#7dd3fc]"
+                            : "bg-[#252526] border-[#3c3c3c] text-[#787878]"
+                        }`}
+                        title="正規表現モード切替"
+                      >
+                        .*
+                      </button>
+                      <button
+                        onClick={() => handleDeleteSimRule(rule.id)}
+                        className="text-[#8e95a2] hover:text-[#f87171]"
+                        title="ルールを削除"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 gap-1 font-mono text-[10.5px]">
+                    <input
+                      type="text"
+                      value={rule.pattern}
+                      onChange={(e) =>
+                        handleUpdateSimRule(rule.id, { pattern: e.target.value })
+                      }
+                      placeholder="置換前パターン"
+                      className="w-full bg-[#252526] border border-[#3c3c3c] rounded px-1.5 py-0.5 text-[#fca5a5]"
+                    />
+                    <input
+                      type="text"
+                      value={rule.replacement}
+                      onChange={(e) =>
+                        handleUpdateSimRule(rule.id, { replacement: e.target.value })
+                      }
+                      placeholder="置換後 (空欄で無視)"
+                      className="w-full bg-[#252526] border border-[#3c3c3c] rounded px-1.5 py-0.5 text-[#86efac]"
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 新規ルール追加 */}
+          <div className="pt-2 border-t border-[#2b2b2b] space-y-1.5">
+            <div className="text-[10.5px] text-[#9cdcfe] font-semibold uppercase tracking-wider">
+              Sim置換ルールを追加
+            </div>
+            <input
+              type="text"
+              placeholder="ルール名 (例: パレット退避無効化)"
+              value={newSimName}
+              onChange={(e) => setNewSimName(e.target.value)}
+              className="w-full bg-[#1e1e1e] border border-[#3c3c3c] rounded px-2 py-1 text-[11px] text-white"
+            />
+            <input
+              type="text"
+              placeholder="検索 (例: G91X650.Y-99.5)"
+              value={newSimPattern}
+              onChange={(e) => setNewSimPattern(e.target.value)}
+              className="w-full bg-[#1e1e1e] border border-[#3c3c3c] rounded px-2 py-1 font-mono text-[11px] text-white"
+            />
+            <input
+              type="text"
+              placeholder="置換後 (例: G91X0.Y0. / 空欄で除去)"
+              value={newSimReplacement}
+              onChange={(e) => setNewSimReplacement(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleAddSimRule();
+              }}
+              className="w-full bg-[#1e1e1e] border border-[#3c3c3c] rounded px-2 py-1 font-mono text-[11px] text-white"
+            />
+            <div className="flex items-center justify-between gap-2">
+              <label className="flex items-center gap-1.5 cursor-pointer text-[11px] text-[#cbd5e1]">
+                <input
+                  type="checkbox"
+                  checked={newSimRegex}
+                  onChange={(e) => setNewSimRegex(e.target.checked)}
+                  className="accent-[#0078d4]"
+                />
+                <span>正規表現を使用</span>
+              </label>
+              <button
+                onClick={handleAddSimRule}
+                disabled={!newSimPattern.trim()}
+                className="px-2.5 py-1 rounded bg-[#0078d4] hover:bg-[#1a8ad4] disabled:opacity-40 text-white text-[11px] flex items-center gap-1"
+              >
+                <Plus className="w-3.5 h-3.5" /> 追加
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

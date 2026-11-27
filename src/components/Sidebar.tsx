@@ -4,13 +4,17 @@ import type {
   DisplayOptions,
   MachineConfig,
   MachineProfile,
+  NcSnippet,
   ParseResult,
+  ReplaceBatch,
+  ReplaceRule,
 } from "../types/nc";
 import { FilterPanel } from "./sidebar/FilterPanel";
 import { MachineProfilePanel } from "./sidebar/MachineProfilePanel";
+import { EditToolsPanel } from "./sidebar/EditToolsPanel";
 import { DebugPanel } from "./sidebar/DebugPanel";
 
-export type SidebarTab = "filter" | "machine" | "debug";
+export type SidebarTab = "filter" | "machine" | "edit" | "debug";
 
 interface SidebarProps {
   activeTab: SidebarTab;
@@ -28,6 +32,17 @@ interface SidebarProps {
   onExportActiveMachineProfile: () => void;
   onExportAllMachineProfiles: () => void;
   onImportMachineProfiles: () => void;
+  replaceBatches: ReplaceBatch[];
+  onUpdateReplaceBatches: (batches: ReplaceBatch[]) => void;
+  onRunReplaceBatch: (batch: ReplaceBatch) => void;
+  onApplySingleRule: (rule: ReplaceRule) => void;
+  onExportReplaceBatches: () => void;
+  onImportReplaceBatches: () => void;
+  snippets: NcSnippet[];
+  onUpdateSnippets: (snippets: NcSnippet[]) => void;
+  onInsertSnippet: (snippet: NcSnippet) => void;
+  onExportSnippets: () => void;
+  onImportSnippets: () => void;
   breakpoints: number[];
   onToggleBreakpoint: (lineNumber: number) => void;
   onClearBreakpoints: () => void;
@@ -37,8 +52,9 @@ interface SidebarProps {
 }
 
 const TITLES: Record<SidebarTab, string> = {
-  filter: "表示フィルタ & レイヤー",
+  filter: "表示フィルタ & ストック",
   machine: "マシン設定 (工具・径補正・仕様)",
+  edit: "正規表現置換 & 定型文",
   debug: "ブレイクポイント & 自動停止",
 };
 
@@ -71,6 +87,21 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
             onExportActiveProfile={props.onExportActiveMachineProfile}
             onExportAllProfiles={props.onExportAllMachineProfiles}
             onImportProfiles={props.onImportMachineProfiles}
+          />
+        )}
+        {props.activeTab === "edit" && (
+          <EditToolsPanel
+            replaceBatches={props.replaceBatches}
+            onUpdateReplaceBatches={props.onUpdateReplaceBatches}
+            onRunReplaceBatch={props.onRunReplaceBatch}
+            onApplySingleRule={props.onApplySingleRule}
+            onExportReplaceBatches={props.onExportReplaceBatches}
+            onImportReplaceBatches={props.onImportReplaceBatches}
+            snippets={props.snippets}
+            onUpdateSnippets={props.onUpdateSnippets}
+            onInsertSnippet={props.onInsertSnippet}
+            onExportSnippets={props.onExportSnippets}
+            onImportSnippets={props.onImportSnippets}
           />
         )}
         {props.activeTab === "debug" && (

@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import {
+  Columns3,
   Crosshair,
   Eye,
   Focus,
@@ -77,6 +78,7 @@ interface ViewportOverlaysProps {
   measureMode: boolean;
   onToggleMeasureMode: () => void;
   measurePoints: SnapPoint[];
+  measureAnchor: { x: number; y: number } | null;
   onClearMeasurePoints: () => void;
   measurementStats: MeasurementStats | null;
   snapHover: ActiveSnapHover | null;
@@ -109,6 +111,7 @@ export const ViewportOverlays: React.FC<ViewportOverlaysProps> = ({
   measureMode,
   onToggleMeasureMode,
   measurePoints,
+  measureAnchor,
   onClearMeasurePoints,
   measurementStats,
   snapHover,
@@ -121,6 +124,9 @@ export const ViewportOverlays: React.FC<ViewportOverlaysProps> = ({
 }) => {
   const [showDro, setShowDro] = useState<boolean>(() => loadSavedShowDro());
   const [helpOpen, setHelpOpen] = useState(false);
+
+  // 3D画面幅が狭いときはツールバーボタンをアイコンのみへ自動縮小
+  const isCompactToolbar = containerWidth < 860;
 
   const toggleDro = () => {
     setShowDro((prev) => {
@@ -149,22 +155,40 @@ export const ViewportOverlays: React.FC<ViewportOverlaysProps> = ({
         />
       )}
 
-      {/* 4面図モード時の境界線 & ラベル */}
-      {displayOptions.quadView && (
+      {/* 3画面分割モード時の境界線 & ラベル（上2面：XY/XZ + 下メイン3D） */}
+      {displayOptions.viewLayout === "triple" && (
         <div className="pointer-events-none absolute inset-0 z-10">
-          <div className="absolute left-1/2 top-0 bottom-0 w-px bg-[#2f333c]" />
-          <div className="absolute top-1/2 left-0 right-0 h-px bg-[#2f333c]" />
+          <div className="absolute top-[34%] left-0 right-0 h-px bg-[#2f333c]" />
+          <div className="absolute top-0 bottom-[66%] left-1/2 w-px bg-[#2f333c]" />
           <span className="absolute top-12 left-2.5 px-1.5 py-0.5 rounded bg-[#141519]/80 border border-[#2f333c] text-[10px] font-mono text-[#9cdcfe]">
             XY 上面 (平行)
           </span>
           <span className="absolute top-12 left-[calc(50%+10px)] px-1.5 py-0.5 rounded bg-[#141519]/80 border border-[#2f333c] text-[10px] font-mono text-[#9cdcfe]">
-            ISO 3D (操作可)
-          </span>
-          <span className="absolute top-[calc(50%+8px)] left-2.5 px-1.5 py-0.5 rounded bg-[#141519]/80 border border-[#2f333c] text-[10px] font-mono text-[#9cdcfe]">
             XZ 正面 (平行)
           </span>
-          <span className="absolute top-[calc(50%+8px)] left-[calc(50%+10px)] px-1.5 py-0.5 rounded bg-[#141519]/80 border border-[#2f333c] text-[10px] font-mono text-[#9cdcfe]">
-            YZ 側面 (平行)
+          <span className="absolute top-[calc(34%+8px)] left-2.5 px-1.5 py-0.5 rounded bg-[#141519]/80 border border-[#2f333c] text-[10px] font-mono text-[#9cdcfe]">
+            メイン 3D (操作可)
+          </span>
+        </div>
+      )}
+
+      {/* 4面図モード時の境界線 & ラベル（上3面：XY/XZ/YZ + 下メイン3D） */}
+      {displayOptions.viewLayout === "quad" && (
+        <div className="pointer-events-none absolute inset-0 z-10">
+          <div className="absolute top-[32%] left-0 right-0 h-px bg-[#2f333c]" />
+          <div className="absolute top-0 bottom-[68%] left-1/3 w-px bg-[#2f333c]" />
+          <div className="absolute top-0 bottom-[68%] left-2/3 w-px bg-[#2f333c]" />
+          <span className="absolute top-12 left-2.5 px-1.5 py-0.5 rounded bg-[#141519]/80 border border-[#2f333c] text-[10px] font-mono text-[#9cdcfe]">
+            XY 上面
+          </span>
+          <span className="absolute top-12 left-[calc(33.33%+8px)] px-1.5 py-0.5 rounded bg-[#141519]/80 border border-[#2f333c] text-[10px] font-mono text-[#9cdcfe]">
+            XZ 正面
+          </span>
+          <span className="absolute top-12 left-[calc(66.66%+8px)] px-1.5 py-0.5 rounded bg-[#141519]/80 border border-[#2f333c] text-[10px] font-mono text-[#9cdcfe]">
+            YZ 側面
+          </span>
+          <span className="absolute top-[calc(32%+8px)] left-2.5 px-1.5 py-0.5 rounded bg-[#141519]/80 border border-[#2f333c] text-[10px] font-mono text-[#9cdcfe]">
+            メイン 3D (操作可)
           </span>
         </div>
       )}
@@ -175,23 +199,25 @@ export const ViewportOverlays: React.FC<ViewportOverlaysProps> = ({
         <div className="pointer-events-auto flex flex-wrap items-center gap-1 bg-[#1f2126]/90 border border-[#32363f] rounded-md px-1.5 py-1 text-[11px] shadow-md backdrop-blur-md">
           {(
             [
-              ["pan", Hand, "移動", "左/中ドラッグで移動、Shift+ドラッグ/右ドラッグで3D回転"],
-              ["orbit", Rotate3d, "回転", "左ドラッグで3D回転、中ドラッグで移動"],
-              ["windowZoom", ScanSearch, "窓ズーム", "左ドラッグで矩形拡大 (Escで解除)"],
+              ["pan", Hand, "移動", "移動 (左/中ドラッグで移動、Shift+ドラッグ/右ドラッグで3D回転)"],
+              ["orbit", Rotate3d, "回転", "回転 (左ドラッグで3D回転、中ドラッグで移動)"],
+              ["windowZoom", ScanSearch, "窓ズーム", "窓ズーム (左ドラッグで矩形拡大 / Escで解除)"],
             ] as const
           ).map(([mode, Icon, label, title]) => (
             <button
               key={mode}
               onClick={() => onSelectNavMode(mode)}
-              className={`flex items-center gap-1 px-2 py-0.5 rounded transition-colors ${
+              className={`flex items-center gap-1 rounded transition-colors ${
+                isCompactToolbar ? "p-1.5" : "px-2 py-0.5"
+              } ${
                 !measureMode && navMode === mode
                   ? "bg-[#0078d4] text-white font-medium shadow-sm"
                   : "text-[#cccccc] hover:bg-[#2f333c]"
               }`}
               title={title}
             >
-              <Icon className="w-3 h-3" />
-              {label}
+              <Icon className="w-3.5 h-3.5 shrink-0" />
+              {!isCompactToolbar && <span>{label}</span>}
             </button>
           ))}
 
@@ -201,60 +227,68 @@ export const ViewportOverlays: React.FC<ViewportOverlaysProps> = ({
             onClick={() =>
               onUpdateDisplayOptions({ showProgramPath: !displayOptions.showProgramPath })
             }
-            className={`flex items-center gap-1 px-2 py-0.5 rounded transition-colors ${
+            className={`flex items-center gap-1 rounded transition-colors ${
+              isCompactToolbar ? "p-1.5" : "px-2 py-0.5"
+            } ${
               displayOptions.showProgramPath
                 ? "bg-[#e879f9]/20 text-[#f0abfc] ring-1 ring-[#e879f9]/40"
                 : "text-[#8e95a2] hover:text-[#e2e8f0] hover:bg-[#2f333c]"
             }`}
-            title="G41/G42 補正前プログラムパスの重ね表示切替"
+            title="補正前パス (G41/G42 補正前プログラムパスの重ね表示切替)"
           >
-            <Scissors className="w-3 h-3" />
-            補正前
+            <Scissors className="w-3.5 h-3.5 shrink-0" />
+            {!isCompactToolbar && <span>補正前</span>}
           </button>
 
           <button
             onClick={() =>
               onUpdateDisplayOptions({ showToolWidthFill: !displayOptions.showToolWidthFill })
             }
-            className={`flex items-center gap-1 px-2 py-0.5 rounded transition-colors ${
+            className={`flex items-center gap-1 rounded transition-colors ${
+              isCompactToolbar ? "p-1.5" : "px-2 py-0.5"
+            } ${
               displayOptions.showToolWidthFill
                 ? "bg-[#38bdf8]/20 text-[#7dd3fc] ring-1 ring-[#38bdf8]/40"
                 : "text-[#8e95a2] hover:text-[#e2e8f0] hover:bg-[#2f333c]"
             }`}
-            title="T番号の工具径幅で切削軌跡を塗りつぶし（削り残し・干渉確認）"
+            title="工具径輪郭表示 (T番号の工具径で外周アウトラインを描画)"
           >
-            <PaintBucket className="w-3 h-3" />
-            工具幅
+            <PaintBucket className="w-3.5 h-3.5 shrink-0" />
+            {!isCompactToolbar && <span>工具幅</span>}
           </button>
 
           <button
             onClick={() =>
               onUpdateDisplayOptions({ traceClipFuture: !displayOptions.traceClipFuture })
             }
-            className={`flex items-center gap-1 px-2 py-0.5 rounded transition-colors ${
+            className={`flex items-center gap-1 rounded transition-colors ${
+              isCompactToolbar ? "p-1.5" : "px-2 py-0.5"
+            } ${
               displayOptions.traceClipFuture
                 ? "bg-[#0078d4]/30 text-[#7dd3fc] ring-1 ring-[#38bdf8]/40"
                 : "text-[#8e95a2] hover:text-[#e2e8f0] hover:bg-[#2f333c]"
             }`}
-            title="現在トレース位置までのみを描画"
+            title="軌跡クリップ (現在トレース位置までのみを描画)"
           >
-            <Eye className="w-3 h-3" />
-            軌跡クリップ
+            <Eye className="w-3.5 h-3.5 shrink-0" />
+            {!isCompactToolbar && <span>軌跡クリップ</span>}
           </button>
 
           <div className="w-px h-3.5 bg-[#353944] mx-0.5" />
 
           <button
             onClick={onToggleMeasureMode}
-            className={`flex items-center gap-1 px-2 py-0.5 rounded transition-colors ${
+            className={`flex items-center gap-1 rounded transition-colors ${
+              isCompactToolbar ? "p-1.5" : "px-2 py-0.5"
+            } ${
               measureMode
                 ? "bg-[#ea580c] text-white font-medium shadow-sm"
                 : "text-[#cccccc] hover:bg-[#2f333c]"
             }`}
-            title="端点・中点・円弧中心スナップによる2点間距離計測 (Escで終了)"
+            title="2点間計測 (端点・中点・円弧中心・軌道上スナップ / Escで終了)"
           >
-            <Ruler className="w-3 h-3" />
-            計測
+            <Ruler className="w-3.5 h-3.5 shrink-0" />
+            {!isCompactToolbar && <span>計測</span>}
           </button>
         </div>
 
@@ -271,12 +305,12 @@ export const ViewportOverlays: React.FC<ViewportOverlaysProps> = ({
             <button
               key={preset}
               onClick={() => {
-                if (displayOptions.quadView) {
-                  onUpdateDisplayOptions({ quadView: false });
+                if (displayOptions.viewLayout !== "single") {
+                  onUpdateDisplayOptions({ viewLayout: "single" });
                 }
                 onApplyCameraPreset(preset);
               }}
-              className="px-2 py-0.5 rounded hover:bg-[#2f333c] text-[#cccccc] hover:text-white transition-colors font-mono"
+              className="px-1.5 py-0.5 rounded hover:bg-[#2f333c] text-[#cccccc] hover:text-white transition-colors font-mono"
               title={`${label}視点へ切替`}
             >
               {label}
@@ -284,16 +318,40 @@ export const ViewportOverlays: React.FC<ViewportOverlaysProps> = ({
           ))}
           <div className="w-px h-3.5 bg-[#353944] mx-0.5" />
           <button
-            onClick={() => onUpdateDisplayOptions({ quadView: !displayOptions.quadView })}
-            className={`px-2 py-0.5 rounded flex items-center gap-1 transition-colors ${
-              displayOptions.quadView
+            onClick={() =>
+              onUpdateDisplayOptions({
+                viewLayout: displayOptions.viewLayout === "triple" ? "single" : "triple",
+              })
+            }
+            className={`rounded flex items-center gap-1 transition-colors ${
+              isCompactToolbar ? "p-1" : "px-2 py-0.5"
+            } ${
+              displayOptions.viewLayout === "triple"
                 ? "bg-[#0078d4] text-white"
                 : "text-[#cccccc] hover:bg-[#2f333c]"
             }`}
-            title="4面図表示の切替 (XY / XZ / YZ / ISO)"
+            title="3画面分割表示の切替 (上: XY / XZ、下: メイン3D)"
           >
-            <Grid2x2 className="w-3.5 h-3.5" />
-            4面
+            <Columns3 className="w-3.5 h-3.5 shrink-0" />
+            {!isCompactToolbar && <span>3面</span>}
+          </button>
+          <button
+            onClick={() =>
+              onUpdateDisplayOptions({
+                viewLayout: displayOptions.viewLayout === "quad" ? "single" : "quad",
+              })
+            }
+            className={`rounded flex items-center gap-1 transition-colors ${
+              isCompactToolbar ? "p-1" : "px-2 py-0.5"
+            } ${
+              displayOptions.viewLayout === "quad"
+                ? "bg-[#0078d4] text-white"
+                : "text-[#cccccc] hover:bg-[#2f333c]"
+            }`}
+            title="4面図表示の切替 (上: XY / XZ / YZ、下: メイン3D)"
+          >
+            <Grid2x2 className="w-3.5 h-3.5 shrink-0" />
+            {!isCompactToolbar && <span>4面</span>}
           </button>
           <button
             onClick={() => onApplyCameraPreset("fit")}
@@ -320,93 +378,129 @@ export const ViewportOverlays: React.FC<ViewportOverlaysProps> = ({
           <div className="w-px h-3.5 bg-[#353944] mx-0.5" />
           <button
             onClick={toggleDro}
-            className={`px-1.5 py-0.5 rounded flex items-center gap-1 transition-colors font-mono ${
+            className={`rounded flex items-center gap-1 transition-colors font-mono ${
+              isCompactToolbar ? "p-1" : "px-1.5 py-0.5"
+            } ${
               showDro
                 ? "bg-[#38bdf8]/20 text-[#7dd3fc]"
                 : "text-[#8e95a2] hover:text-white hover:bg-[#2f333c]"
             }`}
             title="実機CNC風ライブ座標 DRO の表示切替"
           >
-            <Crosshair className="w-3 h-3" />
-            DRO
+            <Crosshair className="w-3.5 h-3.5 shrink-0" />
+            {!isCompactToolbar && <span>DRO</span>}
           </button>
         </div>
       </div>
 
-      {/* 計測モード結果パネル */}
-      {measureMode && (
-        <div className="absolute top-14 left-2.5 z-20 w-72 bg-[#1c1d21]/95 border border-[#ea580c] rounded-md shadow-xl p-2.5 text-[11px] font-mono backdrop-blur-md">
-          <div className="flex items-center justify-between border-b border-[#32363f] pb-1.5 mb-1.5">
-            <span className="text-[#fb923c] font-bold flex items-center gap-1.5">
-              <Ruler className="w-3.5 h-3.5" /> スナップ2点間計測
-            </span>
-            <button
-              onClick={onToggleMeasureMode}
-              className="text-[#94a3b8] hover:text-white"
-              title="計測終了 (Esc)"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-          {measurePoints.length === 0 && (
-            <div className="text-[#94a3b8] font-sans leading-relaxed">
-              パス上の端点（黄）・中点（青）・円弧中心（緑）をクリックして1点目を選択してください。
-            </div>
-          )}
-          {measurePoints.length === 1 && (
-            <div className="space-y-1">
-              <div className="text-[#cbd5e1]">
-                P1 ({snapKindLabel(measurePoints[0].kind)}):{" "}
-                {measurePoints[0].pos.x.toFixed(3)}, {measurePoints[0].pos.y.toFixed(3)},{" "}
-                {measurePoints[0].pos.z.toFixed(3)}
-              </div>
-              <div className="text-[#fb923c] font-sans">2点目をクリックしてください...</div>
-            </div>
-          )}
-          {measurementStats && (
-            <div className="space-y-1 text-[11px]">
-              <div className="text-[#e2e8f0] text-xs font-bold">
-                3D距離:{" "}
-                <span className="text-[#fbbf24]">{measurementStats.dist3d.toFixed(3)} mm</span>
-              </div>
-              <div className="text-[#cbd5e1]">
-                XY平面:{" "}
-                <span className="text-[#38bdf8]">{measurementStats.distXY.toFixed(3)} mm</span> (
-                {measurementStats.angleDeg.toFixed(2)}°)
-              </div>
-              <div className="text-[#94a3b8]">
-                ΔX: {measurementStats.dx.toFixed(3)} / ΔY: {measurementStats.dy.toFixed(3)} / ΔZ:{" "}
-                {measurementStats.dz.toFixed(3)}
-              </div>
-              <div className="text-[10px] text-[#64748b] pt-1 border-t border-[#2f333c]">
-                P1 ({measurementStats.a.x.toFixed(2)}, {measurementStats.a.y.toFixed(2)},{" "}
-                {measurementStats.a.z.toFixed(2)}) → P2 ({measurementStats.b.x.toFixed(2)},{" "}
-                {measurementStats.b.y.toFixed(2)}, {measurementStats.b.z.toFixed(2)})
-              </div>
+      {/* 2点確定時の固定計測ツールチップ（2点目クリック位置にフル情報をそのまま表示） */}
+      {measureMode && measurementStats && measureAnchor && (() => {
+        const boxW = 290;
+        const boxH = 104;
+        const p1Kind = snapKindLabel(measurePoints[0].kind);
+        const p2Kind = snapKindLabel(measurePoints[1].kind);
+        return (
+          <div
+            className="pointer-events-auto absolute z-30 w-[290px] bg-[#1c1d21]/95 border border-[#f97316] rounded-md px-2.5 py-1.5 text-[10.5px] font-mono shadow-2xl backdrop-blur-md space-y-1"
+            style={{
+              left: Math.min(measureAnchor.x + 14, Math.max(12, containerWidth - boxW - 12)),
+              top: Math.max(
+                48,
+                Math.min(measureAnchor.y - boxH - 8, containerHeight - boxH - 64),
+              ),
+            }}
+          >
+            <div className="flex items-center justify-between gap-2 border-b border-[#32363f] pb-1">
+              <span className="text-[#fb923c] font-bold flex items-center gap-1 text-[11px]">
+                <Ruler className="w-3 h-3" />
+                長さ <span className="text-[#fbbf24] text-xs">{measurementStats.dist3d.toFixed(3)} mm</span>
+              </span>
               <button
                 onClick={onClearMeasurePoints}
-                className="mt-1 text-[10.5px] text-[#38bdf8] hover:underline font-sans"
+                className="text-[#8e95a2] hover:text-white p-0.5 rounded hover:bg-[#2f333c]"
+                title="計測点を解除（余白クリックでも解除できます）"
               >
-                クリアして再計測
+                <X className="w-3 h-3" />
               </button>
             </div>
-          )}
-        </div>
-      )}
+            <div className="text-[#e2e8f0] flex items-center gap-2.5">
+              <span>
+                <span className="text-[#f87171]">ΔX</span> {measurementStats.dx.toFixed(3)}
+              </span>
+              <span>
+                <span className="text-[#4ade80]">ΔY</span> {measurementStats.dy.toFixed(3)}
+              </span>
+              <span>
+                <span className="text-[#60a5fa]">ΔZ</span> {measurementStats.dz.toFixed(3)}
+              </span>
+            </div>
+            <div className="text-[#cbd5e1] text-[10px]">
+              XY <span className="text-[#38bdf8] font-semibold">{measurementStats.distXY.toFixed(3)}</span>mm
+              <span className="text-[#6e7681] mx-1.5">|</span>
+              角度 <span className="text-[#fef08a]">{measurementStats.angleDeg.toFixed(2)}°</span>
+            </div>
+            <div className="text-[9.5px] text-[#94a3b8] border-t border-[#2a2d36] pt-1 space-y-0.5 leading-tight">
+              <div className="truncate">
+                P1[{p1Kind}] X{measurementStats.a.x.toFixed(3)} Y{measurementStats.a.y.toFixed(3)} Z
+                {measurementStats.a.z.toFixed(3)}
+              </div>
+              <div className="truncate">
+                P2[{p2Kind}] X{measurementStats.b.x.toFixed(3)} Y{measurementStats.b.y.toFixed(3)} Z
+                {measurementStats.b.z.toFixed(3)}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
-      {/* スナップカーソルバッジ */}
-      {measureMode && snapHover && (
-        <div
-          className="pointer-events-none absolute z-30 bg-[#1c1d21]/95 border border-[#facc15] rounded px-2 py-0.5 text-[10.5px] font-mono text-[#fef08a] shadow-lg"
-          style={{
-            left: Math.min(snapHover.x + 12, Math.max(12, containerWidth - 220)),
-            top: Math.max(12, snapHover.y - 28),
-          }}
-        >
-          [{snapKindLabel(snapHover.snap.kind)}] X{snapHover.snap.pos.x.toFixed(2)} Y
-          {snapHover.snap.pos.y.toFixed(2)} Z{snapHover.snap.pos.z.toFixed(2)}
-        </div>
-      )}
+      {/* スナップカーソルバッジ（1点目選択中は ΔX/ΔY/ΔZ・距離・角度をライブ表示） */}
+      {measureMode && snapHover && measurePoints.length < 2 && (() => {
+        const p1 = measurePoints.length === 1 ? measurePoints[0].pos : null;
+        const p2 = snapHover.snap.pos;
+        const dx = p1 ? p2.x - p1.x : 0;
+        const dy = p1 ? p2.y - p1.y : 0;
+        const dz = p1 ? p2.z - p1.z : 0;
+        const dist3d = p1 ? Math.hypot(dx, dy, dz) : 0;
+        const distXY = p1 ? Math.hypot(dx, dy) : 0;
+        const angleDeg = p1 ? (Math.atan2(dy, dx) * 180) / Math.PI : 0;
+        const boxW = p1 ? 264 : 225;
+        const boxH = p1 ? 74 : 28;
+        return (
+          <div
+            className="pointer-events-none absolute z-30 bg-[#1c1d21]/95 border border-[#facc15] rounded-md px-2.5 py-1 text-[10.5px] font-mono shadow-xl backdrop-blur-md space-y-0.5"
+            style={{
+              left: Math.min(snapHover.x + 14, Math.max(12, containerWidth - boxW - 12)),
+              top: Math.max(12, Math.min(snapHover.y - boxH - 8, containerHeight - boxH - 12)),
+            }}
+          >
+            <div className="text-[#fef08a]">
+              [{snapKindLabel(snapHover.snap.kind)}] X{p2.x.toFixed(3)} Y{p2.y.toFixed(3)} Z
+              {p2.z.toFixed(3)}
+            </div>
+            {p1 && (
+              <>
+                <div className="text-[#e2e8f0] border-t border-[#32363f] pt-0.5 flex items-center gap-2">
+                  <span>
+                    <span className="text-[#f87171]">ΔX</span> {dx.toFixed(3)}
+                  </span>
+                  <span>
+                    <span className="text-[#4ade80]">ΔY</span> {dy.toFixed(3)}
+                  </span>
+                  <span>
+                    <span className="text-[#60a5fa]">ΔZ</span> {dz.toFixed(3)}
+                  </span>
+                </div>
+                <div className="text-[#cbd5e1] text-[10px]">
+                  長さ <span className="text-[#fbbf24] font-semibold">{dist3d.toFixed(3)}</span>mm
+                  <span className="text-[#6e7681] mx-1">|</span>
+                  XY <span className="text-[#38bdf8]">{distXY.toFixed(3)}</span>mm (
+                  {angleDeg.toFixed(1)}°)
+                </div>
+              </>
+            )}
+          </div>
+        );
+      })()}
 
       {/* マウスホバー・ナビゲーション ツールチップ（画面端クランプ付き） */}
       {!measureMode && hoverInfo && (

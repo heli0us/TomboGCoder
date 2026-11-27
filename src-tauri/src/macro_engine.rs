@@ -1,8 +1,9 @@
-use crate::models::{Diagnostic, DiagnosticSeverity, MacroVariableEntry};
+use crate::models::{Diagnostic, DiagnosticSeverity, MacroVariableEntry, SimReplaceRule};
 use crate::parser::{parse_single_line, NcBlock};
+use encoding_rs::{SHIFT_JIS, UTF_8};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const MAX_EXEC_STEPS: usize = 200_000;
 const MAX_CALL_DEPTH: usize = 16;
@@ -118,10 +119,25 @@ pub fn expand_program(
     source: &str,
     optional_block_skip: bool,
     file_path: Option<&str>,
+    subprogram_dirs: &[String],
+    sim_replace_rules: &[SimReplaceRule],
     diagnostics: &mut Vec<Diagnostic>,
 ) -> MacroExpandOutput {
-    let base_dir = file_path.and_then(|p| Path::new(p).parent());
-    let (mut programs, program_order) = split_programs(source);
+    let mut search_dirs: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = file_path.and_then(|p| Path::new(p).parent()) {
+        search_dirs.push(dir.to_path_buf());
+    }
+    for d in subprogram_dirs {
+        let t = d.trim();
+        if !t.is_empty() {
+            let pb = PathBuf::from(t);
+            if !search_dirs.contains(&pb) {
+                search_dirs.push(pb);
+            }
+        }
+    }
+
+    let (mut programs, program_order) = split_programs(source, diagnostics);
     let main_name = program_order
         .first()
         .cloned()
@@ -423,7 +439,12 @@ pub fn expand_program(
                     .unwrap_or(1);
 
                 if let Some(p_val) = p_num {
-                    let sub_key = resolve_subprogram_key(p_val, &mut programs, base_dir);
+                    let sub_key = resolve_subprogram_key(
+                        p_val,
+                        &mut programs,
+                        &search_dirs,
+                        sim_replace_rules,
+                    );
                     if let Some(sub_name) = sub_key {
                         if call_stack.len() >= MAX_CALL_DEPTH {
                             diagnostics.push(Diagnostic {
@@ -501,8 +522,12 @@ pub fn expand_program(
                         (p_num_full, 1)
                     };
 
-                    if let Some(sub_name) = resolve_subprogram_key(sub_num, &mut programs, base_dir)
-                    {
+                    if let Some(sub_name) = resolve_subprogram_key(
+                        sub_num,
+                        &mut programs,
+                        &search_dirs,
+                        sim_replace_rules,
+                    ) {
                         if call_stack.len() >= MAX_CALL_DEPTH {
                             diagnostics.push(Diagnostic {
                                 severity: DiagnosticSeverity::Error,
@@ -620,10 +645,14 @@ pub fn expand_program(
     }
 }
 
-/// ソースを O番号ごとの ProgramUnit に分割し、出現順リストも返す
-fn split_programs(source: &str) -> (HashMap<String, ProgramUnit>, Vec<String>) {
+/// ソースを O番号ごとの ProgramUnit に分割し、出現順リストも返す（同一ファイル内のO番号重複を警告）
+fn split_programs(
+    source: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> (HashMap<String, ProgramUnit>, Vec<String>) {
     let mut programs: HashMap<String, ProgramUnit> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
+    let mut first_defined_line: HashMap<String, usize> = HashMap::new();
     let mut current_name = "MAIN".to_string();
     let mut current_lines: Vec<(usize, String)> = Vec::new();
     let mut has_executable_in_current = false;
@@ -633,12 +662,26 @@ fn split_programs(source: &str) -> (HashMap<String, ProgramUnit>, Vec<String>) {
         let code = strip_comments(line.trim());
         let code_t = code.trim();
         if let Some(o_name) = detect_program_header(code_t) {
+            if let Some(&first_line) = first_defined_line.get(&o_name) {
+                diagnostics.push(Diagnostic {
+                    severity: DiagnosticSeverity::Warning,
+                    line_number: line_no,
+                    code: "DUPLICATE_PROGRAM_NUMBER".to_string(),
+                    message: format!(
+                        "プログラム番号 {} が重複しています（最初の定義: {} 行目）",
+                        o_name, first_line
+                    ),
+                });
+            } else {
+                first_defined_line.insert(o_name.clone(), line_no);
+            }
+
             if has_executable_in_current {
                 let unit = build_unit(current_lines);
                 if !order.contains(&current_name) {
                     order.push(current_name.clone());
                 }
-                programs.insert(current_name.clone(), unit);
+                programs.entry(current_name.clone()).or_insert(unit);
                 current_lines = Vec::new();
             }
             current_name = o_name;
@@ -654,7 +697,7 @@ fn split_programs(source: &str) -> (HashMap<String, ProgramUnit>, Vec<String>) {
         if !order.contains(&current_name) {
             order.push(current_name.clone());
         }
-        programs.insert(current_name, unit);
+        programs.entry(current_name).or_insert(unit);
     }
 
     (programs, order)
@@ -688,43 +731,135 @@ fn detect_program_header(code: &str) -> Option<String> {
     None
 }
 
-/// 同一ファイル内 or 同階層の外部ファイルからサブプログラム O番号を解決
+/// UTF-8 / Shift-JIS 自動判別してファイルテキストを読み込む
+fn read_nc_text_lossy(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    if let Ok(s) = std::str::from_utf8(&bytes) {
+        Some(s.trim_start_matches('\u{feff}').to_string())
+    } else {
+        let (decoded, _, had_errors) = SHIFT_JIS.decode(&bytes);
+        if !had_errors {
+            Some(decoded.into_owned())
+        } else {
+            let (fallback, _, _) = UTF_8.decode(&bytes);
+            Some(fallback.into_owned())
+        }
+    }
+}
+
+/// 外部サブプログラムに対してもリテラル Sim置換ルールを1行単位で適用する
+fn apply_literal_sim_rules(content: &str, rules: &[SimReplaceRule]) -> String {
+    let active: Vec<&SimReplaceRule> = rules
+        .iter()
+        .filter(|r| r.enabled && !r.use_regex && !r.pattern.is_empty())
+        .collect();
+    if active.is_empty() {
+        return content.to_string();
+    }
+    let mut out = String::with_capacity(content.len());
+    for (idx, line) in content.lines().enumerate() {
+        if idx > 0 {
+            out.push('\n');
+        }
+        let mut s = line.to_string();
+        for rule in &active {
+            if s.contains(&rule.pattern) {
+                let safe_repl = rule.replacement.replace(['\r', '\n'], " ");
+                s = s.replace(&rule.pattern, &safe_repl);
+            }
+        }
+        out.push_str(&s);
+    }
+    out
+}
+
+/// 同一ファイル内 or 検索フォルダ群からサブプログラム O番号を解決
 fn resolve_subprogram_key(
     num: u32,
     programs: &mut HashMap<String, ProgramUnit>,
-    base_dir: Option<&Path>,
+    search_dirs: &[PathBuf],
+    sim_replace_rules: &[SimReplaceRule],
 ) -> Option<String> {
     let key = format!("O{}", num);
     if programs.contains_key(&key) {
         return Some(key);
     }
-    // 外部ファイル探索（例: O2000.nc, O2000.NC, 2000.nc, O2000.tap 等）
-    if let Some(dir) = base_dir {
-        let candidates = [
-            format!("O{:04}.nc", num),
-            format!("O{:04}.NC", num),
-            format!("O{:04}.dnc", num),
-            format!("O{:04}.DNC", num),
-            format!("O{}.nc", num),
-            format!("O{}.dnc", num),
-            format!("O{:04}.tap", num),
-            format!("{:04}.nc", num),
-            format!("{:04}.dnc", num),
-            format!("O{:04}.txt", num),
-            format!("O{:04}", num),
-        ];
-        for fname in candidates {
+
+    let candidates = [
+        format!("O{:04}.nc", num),
+        format!("O{:04}.NC", num),
+        format!("O{:04}.dnc", num),
+        format!("O{:04}.DNC", num),
+        format!("O{}.nc", num),
+        format!("O{}.NC", num),
+        format!("O{}.dnc", num),
+        format!("O{:04}.tap", num),
+        format!("O{:04}.TAP", num),
+        format!("{:04}.nc", num),
+        format!("{:04}.NC", num),
+        format!("{:04}.dnc", num),
+        format!("O{:04}.txt", num),
+        format!("O{:04}", num),
+        format!("O{}", num),
+    ];
+
+    for dir in search_dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+        // 1) ファイル名候補でダイレクト検索
+        for fname in &candidates {
             let p = dir.join(fname);
             if p.is_file() {
-                if let Ok(content) = fs::read_to_string(&p) {
+                if let Some(raw_content) = read_nc_text_lossy(&p) {
+                    let content = apply_literal_sim_rules(&raw_content, sim_replace_rules);
+                    let mut dummy_diags = Vec::new();
+                    let (sub_progs, _) = split_programs(&content, &mut dummy_diags);
+                    if let Some(unit) = sub_progs.get(&key) {
+                        programs.insert(key.clone(), unit.clone());
+                        return Some(key);
+                    }
                     let lines: Vec<(usize, String)> = content
                         .lines()
                         .enumerate()
                         .map(|(i, s)| (i + 1, s.to_string()))
                         .collect();
-                    let unit = build_unit(lines);
-                    programs.insert(key.clone(), unit);
+                    programs.insert(key.clone(), build_unit(lines));
                     return Some(key);
+                }
+            }
+        }
+
+        // 2) フォルダ内のNCファイル先頭ヘッダ走査（別名ファイルに Oxxxx が含まれるケース対応）
+        if let Ok(entries) = fs::read_dir(dir) {
+            let mut checked = 0usize;
+            for entry in entries.flatten() {
+                if checked >= 200 {
+                    break;
+                }
+                let p = entry.path();
+                if !p.is_file() {
+                    continue;
+                }
+                let meta_len = entry.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
+                if meta_len > 2 * 1024 * 1024 {
+                    continue;
+                }
+                checked += 1;
+                if let Some(raw_content) = read_nc_text_lossy(&p) {
+                    let has_header = raw_content.lines().take(40).any(|l| {
+                        let code = strip_comments(l.trim());
+                        detect_program_header(code.trim()).as_deref() == Some(key.as_str())
+                    });
+                    if has_header {
+                        let content = apply_literal_sim_rules(&raw_content, sim_replace_rules);
+                        let mut dummy_diags = Vec::new();
+                        let (sub_progs, _) = split_programs(&content, &mut dummy_diags);
+                        if let Some(unit) = sub_progs.get(&key) {
+                            programs.insert(key.clone(), unit.clone());
+                            return Some(key);
+                        }
+                    }
                 }
             }
         }

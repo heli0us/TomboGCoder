@@ -1,11 +1,52 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import type { FileReadResult, MachineConfig, ParseResult } from "../types/nc";
+import type { FileReadResult, MachineConfig, ParseResult, SimReplaceRule } from "../types/nc";
 
 /** Tauri デスクトップ実行環境かどうかを判定 */
 export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+/**
+ * 3Dシミュレーション専用の特殊Gコード置換を「行番号を一切ずらさず」に1行単位で適用する
+ * （元ファイル・エディタ内容は書き換えない）
+ */
+export function applySimReplaceRules(source: string, rules: SimReplaceRule[] | undefined): string {
+  if (!rules || rules.length === 0) return source;
+  const active = rules.filter((r) => r.enabled && r.pattern.length > 0);
+  if (active.length === 0) return source;
+
+  const compiled = active
+    .map((r) => {
+      try {
+        const regex = r.useRegex ? new RegExp(r.pattern, "gi") : null;
+        return { rule: r, regex };
+      } catch {
+        return null;
+      }
+    })
+    .filter((x): x is { rule: SimReplaceRule; regex: RegExp | null } => x !== null);
+
+  if (compiled.length === 0) return source;
+
+  const lines = source.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i];
+    const hasCr = line.endsWith("\r");
+    if (hasCr) line = line.slice(0, -1);
+    for (const { rule, regex } of compiled) {
+      // 置換後文字列に改行が混ざると行番号がずれるためスペースへ正規化
+      const safeRepl = rule.replacement.replace(/\r?\n/g, " ");
+      if (regex) {
+        line = line.replace(regex, safeRepl);
+      } else if (line.includes(rule.pattern)) {
+        line = line.split(rule.pattern).join(safeRepl);
+      }
+    }
+    lines[i] = hasCr ? `${line}\r` : line;
+  }
+  return lines.join("\n");
 }
 
 /** Rust NC解析エンジンでGコードを解析 */
@@ -14,9 +55,21 @@ export async function parseNcProgram(
   config: MachineConfig,
   filePath?: string | null,
 ): Promise<ParseResult> {
+  const effectiveSource = applySimReplaceRules(source, config.simReplaceRules);
   return invoke<ParseResult>("parse_nc_program", {
-    request: { source, config, filePath: filePath ?? null },
+    request: { source: effectiveSource, config, filePath: filePath ?? null },
   });
+}
+
+/** ネイティブフォルダ選択ダイアログを開く（サブプログラム検索フォルダ指定用） */
+export async function openFolderDialog(title = "フォルダを選択"): Promise<string | null> {
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    title,
+  });
+  if (!selected || Array.isArray(selected)) return null;
+  return selected;
 }
 
 /** 初期サンプルNCプログラムを取得（標準3軸プレート） */
@@ -136,17 +189,23 @@ export async function exportJsonFile(
   return picked;
 }
 
-/** ネイティブファイル選択ダイアログからJSONファイルを読み込む */
+/** ネイティブファイル選択ダイアログからJSONまたはテキスト設定ファイルを読み込む */
 export async function openJsonFileDialog(
   title = "マシン設定をインポート",
+  allowTextExtensions = false,
 ): Promise<FileReadResult | null> {
   const selected = await open({
     multiple: false,
     title,
-    filters: [
-      { name: "マシン設定 JSON", extensions: ["json"] },
-      { name: "すべてのファイル", extensions: ["*"] },
-    ],
+    filters: allowTextExtensions
+      ? [
+          { name: "JSON / MIFES設定", extensions: ["json", "ini", "txt", "cfg"] },
+          { name: "すべてのファイル", extensions: ["*"] },
+        ]
+      : [
+          { name: "マシン設定 JSON", extensions: ["json"] },
+          { name: "すべてのファイル", extensions: ["*"] },
+        ],
   });
   if (!selected || Array.isArray(selected)) {
     return null;

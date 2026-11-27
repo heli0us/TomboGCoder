@@ -75,6 +75,7 @@ export interface PathSegment {
   lengthMm: number;
   durationSec: number;
   cumulativeTimeSec: number;
+  hasM00?: boolean;
   modalState: ModalSnapshot;
 }
 
@@ -119,6 +120,16 @@ export interface MacroVariableEntry {
   scope: string;
 }
 
+/** 3Dシミュレーション時のみ適用する特殊Gコード置換ルール（元ファイルは変更しない） */
+export interface SimReplaceRule {
+  id: string;
+  name: string;
+  pattern: string;
+  replacement: string;
+  useRegex: boolean;
+  enabled: boolean;
+}
+
 export interface MachineConfig {
   profileName: string;
   rapidRateX: number;
@@ -137,6 +148,10 @@ export interface MachineConfig {
   optionalBlockSkip: boolean;
   autoExtractDiameter: boolean;
   cornerArcRollAround: boolean;
+  /** 外部サブプログラム (M98/G65) 検索フォルダ一覧 */
+  subprogramDirs: string[];
+  /** シミュレーション専用 特殊Gコード置換ルール */
+  simReplaceRules: SimReplaceRule[];
 }
 
 export interface ParseResult {
@@ -162,6 +177,29 @@ export interface FileReadResult {
   encoding: string;
 }
 
+export type ViewportLayoutMode = "single" | "triple" | "quad";
+
+export type StockShape = "box" | "cylinder";
+
+export interface StockConfig {
+  enabled: boolean;
+  shape: StockShape;
+  /** 四角(box): X幅 / Y奥行 / Z厚み (mm) */
+  sizeX: number;
+  sizeY: number;
+  sizeZ: number;
+  /** 丸(cylinder): 直径 Ø (mm) */
+  diameter: number;
+  /** 四角: X最小端 / 丸: 中心X (mm) */
+  originX: number;
+  /** 四角: Y最小端 / 丸: 中心Y (mm) */
+  originY: number;
+  /** ワーク上面 Z座標 (mm)（ここから -sizeZ 方向へ素材が存在） */
+  topZ: number;
+  /** 半透明の不透明度 (0.05..0.6) */
+  opacity: number;
+}
+
 export interface DisplayOptions {
   showRapid: boolean;
   showProgramPath: boolean;
@@ -172,7 +210,8 @@ export interface DisplayOptions {
   showBoundingBox: boolean;
   colorByTool: boolean;
   traceClipFuture: boolean;
-  quadView: boolean;
+  viewLayout: ViewportLayoutMode;
+  stock: StockConfig;
   zSliceEnabled: boolean;
   zSliceMin: number;
   zSliceMax: number;
@@ -200,6 +239,7 @@ export interface MachineProfile {
 
 export interface AutoBreakConfig {
   onToolChange: boolean;
+  onM00: boolean;
   onZPlunge: boolean;
   onCompChange: boolean;
   onErrorLine: boolean;
@@ -242,6 +282,21 @@ export const DEFAULT_MACHINE_CONFIG: MachineConfig = {
   optionalBlockSkip: false,
   autoExtractDiameter: true,
   cornerArcRollAround: true,
+  subprogramDirs: [],
+  simReplaceRules: [],
+};
+
+export const DEFAULT_STOCK_CONFIG: StockConfig = {
+  enabled: false,
+  shape: "box",
+  sizeX: 120,
+  sizeY: 90,
+  sizeZ: 25,
+  diameter: 100,
+  originX: 0,
+  originY: 0,
+  topZ: 0,
+  opacity: 0.18,
 };
 
 export const DEFAULT_DISPLAY_OPTIONS: DisplayOptions = {
@@ -254,7 +309,8 @@ export const DEFAULT_DISPLAY_OPTIONS: DisplayOptions = {
   showBoundingBox: false,
   colorByTool: false,
   traceClipFuture: false,
-  quadView: false,
+  viewLayout: "single",
+  stock: DEFAULT_STOCK_CONFIG,
   zSliceEnabled: false,
   zSliceMin: -50,
   zSliceMax: 100,
@@ -395,8 +451,94 @@ export function toolShapeLabel(shape: ToolShape): string {
   }
 }
 
+/** NCコード編集用の正規表現置換ルール（1ステップ） */
+export interface ReplaceRule {
+  id: string;
+  name: string;
+  pattern: string;
+  replacement: string;
+  useRegex: boolean;
+  ignoreCase: boolean;
+  multiline: boolean;
+  enabled: boolean;
+}
+
+/** 複数の置換ルールを順番に一括実行する置換バッチ（MIFES REPBATCH 互換） */
+export interface ReplaceBatch {
+  id: string;
+  name: string;
+  rules: ReplaceRule[];
+}
+
+/** NCエディタへワンクリック挿入できる定型文（スニペット） */
+export interface NcSnippet {
+  id: string;
+  name: string;
+  category: string;
+  body: string;
+}
+
+export const DEFAULT_REPLACE_RULES: ReplaceRule[] = [
+  {
+    id: "rule-strip-trailing-spaces",
+    name: "行末の余分な空白を除去",
+    pattern: "[ \\t]+$",
+    replacement: "",
+    useRegex: true,
+    ignoreCase: false,
+    multiline: true,
+    enabled: true,
+  },
+  {
+    id: "rule-strip-n-numbers",
+    name: "行頭のシーケンス番号 (N番号) を削除",
+    pattern: "^[ \\t]*N\\d+[ \\t]*",
+    replacement: "",
+    useRegex: true,
+    ignoreCase: true,
+    multiline: true,
+    enabled: false,
+  },
+];
+
+export const DEFAULT_REPLACE_BATCHES: ReplaceBatch[] = [
+  {
+    id: "batch-default-format",
+    name: "基本整形 (空白・N番号)",
+    rules: DEFAULT_REPLACE_RULES,
+  },
+];
+
+export const DEFAULT_NC_SNIPPETS: NcSnippet[] = [
+  {
+    id: "snip-safety-block",
+    name: "安全ブロック (標準)",
+    category: "ヘッダ",
+    body: "G90 G40 G49 G80 G17 G21",
+  },
+  {
+    id: "snip-tool-change",
+    name: "工具交換 + アプローチ",
+    category: "工具交換",
+    body: "T01 M06\nG54 G00 X0.0 Y0.0\nG43 Z50.0 H01 S6000 M03",
+  },
+  {
+    id: "snip-m00-check",
+    name: "M00 ワーク確認停止",
+    category: "停止",
+    body: "G00 Z100.0\nM05\nM00 (WORK CHECK)",
+  },
+  {
+    id: "snip-footer-m30",
+    name: "プログラム終了フッタ (M30)",
+    category: "フッタ",
+    body: "G00 Z100.0\nM05\nG91 G28 Z0.0\nG90\nM30",
+  },
+];
+
 export const DEFAULT_AUTO_BREAK: AutoBreakConfig = {
   onToolChange: false,
+  onM00: true,
   onZPlunge: false,
   onCompChange: false,
   onErrorLine: true,

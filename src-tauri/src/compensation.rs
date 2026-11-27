@@ -702,6 +702,7 @@ fn materialize_corner_arc(
     let mut seg = parent.clone();
     seg.id = id;
     seg.is_compensated = true;
+    seg.has_m00 = false;
     seg.motion_type = if cw {
         MotionType::ArcCw
     } else {

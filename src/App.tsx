@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Bug, Layers, Settings } from "lucide-react";
+import { Bug, Layers, Search, Settings, Wand2 } from "lucide-react";
 import { NcEditor, type EditorSelectionInfo, type NcEditorHandle } from "./components/NcEditor";
 import { ToolpathViewport } from "./components/ToolpathViewport";
 import { Sidebar, type SidebarTab } from "./components/Sidebar";
@@ -13,11 +13,10 @@ import {
   UnsavedChangesModal,
 } from "./components/FileActionModals";
 import { HelpModal } from "./components/HelpModals";
+import { WelcomeScreen } from "./components/WelcomeScreen";
 import {
   exportJsonFile,
   exportReportFile,
-  getMacroSampleNc,
-  getSampleNc,
   isTauriRuntime,
   onNcFileChanged,
   openJsonFileDialog,
@@ -31,22 +30,38 @@ import {
 import { buildCsvReport, buildHtmlReport } from "./utils/reportGenerator";
 import { buildFilteredParseResult } from "./utils/filterResult";
 import {
+  applyReplaceRulesToText,
+  parseImportedReplaceBatches,
+  repairReplaceBatches,
+} from "./utils/replaceEngine";
+import {
   BUILTIN_MACHINE_PROFILES,
   type AutoBreakConfig,
   type CameraPreset,
   DEFAULT_AUTO_BREAK,
   DEFAULT_DISPLAY_OPTIONS,
   DEFAULT_MACHINE_CONFIG,
+  DEFAULT_NC_SNIPPETS,
+  DEFAULT_REPLACE_BATCHES,
   type DisplayOptions,
   type FileReadResult,
   type MachineConfig,
   type MachineProfile,
+  type NcSnippet,
   type ParseResult,
+  type ReplaceBatch,
+  type ReplaceRule,
 } from "./types/nc";
 
 const MACHINE_PROFILES_STORAGE_KEY = "tombo_gcoder_machine_profiles_v1";
 const ACTIVE_MACHINE_ID_STORAGE_KEY = "tombo_gcoder_active_machine_id_v1";
 const PLAYBACK_SPEED_STORAGE_KEY = "tombo_gcoder_playback_speed_v1";
+const SKIP_ATC_STORAGE_KEY = "tombo_gcoder_skip_atc_v1";
+const EDITOR_FONT_SIZE_STORAGE_KEY = "tombo_gcoder_editor_font_size_v1";
+const REPLACE_BATCHES_STORAGE_KEY = "tombo_gcoder_replace_batches_v1";
+const NC_SNIPPETS_STORAGE_KEY = "tombo_gcoder_nc_snippets_v1";
+const DISPLAY_OPTIONS_STORAGE_KEY = "tombo_gcoder_display_options_v1";
+const AUTO_BREAK_STORAGE_KEY = "tombo_gcoder_auto_break_v1";
 const UI_LAYOUT_STORAGE_KEY = "tombo_gcoder_ui_layout_v1";
 const RECENT_FILES_STORAGE_KEY = "tombo_gcoder_recent_files_v1";
 const MAX_RECENT_FILES = 8;
@@ -81,7 +96,10 @@ function loadSavedUiLayout(): SavedUiLayout {
     return {
       sidebarOpen: typeof p.sidebarOpen === "boolean" ? p.sidebarOpen : DEFAULT_UI_LAYOUT.sidebarOpen,
       sidebarTab:
-        p.sidebarTab === "filter" || p.sidebarTab === "machine" || p.sidebarTab === "debug"
+        p.sidebarTab === "filter" ||
+        p.sidebarTab === "machine" ||
+        p.sidebarTab === "edit" ||
+        p.sidebarTab === "debug"
           ? p.sidebarTab
           : p.sidebarTab === "tools"
             ? "machine"
@@ -142,6 +160,10 @@ function cloneMachineConfig(cfg: MachineConfig): MachineConfig {
         { ...v },
       ]),
     ),
+    subprogramDirs: Array.isArray(cfg.subprogramDirs) ? [...cfg.subprogramDirs] : [],
+    simReplaceRules: Array.isArray(cfg.simReplaceRules)
+      ? cfg.simReplaceRules.map((r) => ({ ...r }))
+      : [],
   };
 }
 
@@ -191,6 +213,104 @@ function loadSavedActiveMachineId(profiles: MachineProfile[]): string {
 function sanitizeFileName(name: string): string {
   const cleaned = name.trim().replace(/[\\/:*?"<>|\s]+/g, "_");
   return cleaned || "machine";
+}
+
+function loadSavedDisplayOptions(): DisplayOptions {
+  try {
+    const raw = window.localStorage.getItem(DISPLAY_OPTIONS_STORAGE_KEY);
+    if (!raw) return DEFAULT_DISPLAY_OPTIONS;
+    const p = JSON.parse(raw) as Partial<DisplayOptions>;
+    return {
+      ...DEFAULT_DISPLAY_OPTIONS,
+      showRapid: typeof p.showRapid === "boolean" ? p.showRapid : DEFAULT_DISPLAY_OPTIONS.showRapid,
+      showProgramPath:
+        typeof p.showProgramPath === "boolean"
+          ? p.showProgramPath
+          : DEFAULT_DISPLAY_OPTIONS.showProgramPath,
+      showCompensatedPath:
+        typeof p.showCompensatedPath === "boolean"
+          ? p.showCompensatedPath
+          : DEFAULT_DISPLAY_OPTIONS.showCompensatedPath,
+      showToolModel:
+        typeof p.showToolModel === "boolean"
+          ? p.showToolModel
+          : DEFAULT_DISPLAY_OPTIONS.showToolModel,
+      showToolWidthFill:
+        typeof p.showToolWidthFill === "boolean"
+          ? p.showToolWidthFill
+          : DEFAULT_DISPLAY_OPTIONS.showToolWidthFill,
+      showGrid: typeof p.showGrid === "boolean" ? p.showGrid : DEFAULT_DISPLAY_OPTIONS.showGrid,
+      showBoundingBox:
+        typeof p.showBoundingBox === "boolean"
+          ? p.showBoundingBox
+          : DEFAULT_DISPLAY_OPTIONS.showBoundingBox,
+      colorByTool:
+        typeof p.colorByTool === "boolean" ? p.colorByTool : DEFAULT_DISPLAY_OPTIONS.colorByTool,
+      traceClipFuture:
+        typeof p.traceClipFuture === "boolean"
+          ? p.traceClipFuture
+          : DEFAULT_DISPLAY_OPTIONS.traceClipFuture,
+      viewLayout:
+        p.viewLayout === "single" || p.viewLayout === "triple" || p.viewLayout === "quad"
+          ? p.viewLayout
+          : DEFAULT_DISPLAY_OPTIONS.viewLayout,
+      stock:
+        p.stock && typeof p.stock === "object"
+          ? { ...DEFAULT_DISPLAY_OPTIONS.stock, ...p.stock }
+          : DEFAULT_DISPLAY_OPTIONS.stock,
+      // ファイル固有フィルタ（O/T/D非表示・Zスライス）は毎回クリーン開始
+      zSliceEnabled: false,
+      hiddenTools: [],
+      hiddenDNumbers: [],
+      hiddenPrograms: [],
+    };
+  } catch {
+    return DEFAULT_DISPLAY_OPTIONS;
+  }
+}
+
+function loadSavedAutoBreak(): AutoBreakConfig {
+  try {
+    const raw = window.localStorage.getItem(AUTO_BREAK_STORAGE_KEY);
+    if (!raw) return DEFAULT_AUTO_BREAK;
+    const p = JSON.parse(raw) as Partial<AutoBreakConfig>;
+    return {
+      onToolChange:
+        typeof p.onToolChange === "boolean" ? p.onToolChange : DEFAULT_AUTO_BREAK.onToolChange,
+      onM00: typeof p.onM00 === "boolean" ? p.onM00 : DEFAULT_AUTO_BREAK.onM00,
+      onZPlunge: typeof p.onZPlunge === "boolean" ? p.onZPlunge : DEFAULT_AUTO_BREAK.onZPlunge,
+      onCompChange:
+        typeof p.onCompChange === "boolean" ? p.onCompChange : DEFAULT_AUTO_BREAK.onCompChange,
+      onErrorLine:
+        typeof p.onErrorLine === "boolean" ? p.onErrorLine : DEFAULT_AUTO_BREAK.onErrorLine,
+    };
+  } catch {
+    return DEFAULT_AUTO_BREAK;
+  }
+}
+
+function loadSavedReplaceBatches(): ReplaceBatch[] {
+  try {
+    const raw = window.localStorage.getItem(REPLACE_BATCHES_STORAGE_KEY);
+    if (!raw) return DEFAULT_REPLACE_BATCHES;
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.length > 0
+      ? repairReplaceBatches(parsed)
+      : DEFAULT_REPLACE_BATCHES;
+  } catch {
+    return DEFAULT_REPLACE_BATCHES;
+  }
+}
+
+function loadSavedNcSnippets(): NcSnippet[] {
+  try {
+    const raw = window.localStorage.getItem(NC_SNIPPETS_STORAGE_KEY);
+    if (!raw) return DEFAULT_NC_SNIPPETS;
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : DEFAULT_NC_SNIPPETS;
+  } catch {
+    return DEFAULT_NC_SNIPPETS;
+  }
 }
 
 function loadSavedRecentFiles(): RecentFileEntry[] {
@@ -293,13 +413,17 @@ export function App() {
     [],
   );
   const [helpModal, setHelpModal] = useState<null | "shortcuts" | "about">(null);
+  const [hasDocument, setHasDocument] = useState<boolean>(false);
   const [source, setSource] = useState<string>("");
   const [filePath, setFilePath] = useState<string | null>(null);
-  const [fileName, setFileName] = useState<string>("sample_plate.nc");
+  const [fileName, setFileName] = useState<string>("");
   const [encoding, setEncoding] = useState<string>("UTF-8");
   const [isDirty, setIsDirty] = useState<boolean>(false);
   const [watchExternal, setWatchExternal] = useState<boolean>(true);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+
+  const hasDocumentRef = useRef<boolean>(false);
+  hasDocumentRef.current = hasDocument;
 
   // マシンプロファイル一覧とアクティブマシン（ローカル自動永続化）
   const [machineProfiles, setMachineProfiles] = useState<MachineProfile[]>(() =>
@@ -331,14 +455,80 @@ export function App() {
     }
   }, [activeMachineId]);
 
-  const [displayOptions, setDisplayOptions] = useState<DisplayOptions>(DEFAULT_DISPLAY_OPTIONS);
+  const [replaceBatches, setReplaceBatches] = useState<ReplaceBatch[]>(() =>
+    loadSavedReplaceBatches(),
+  );
+  const [snippets, setSnippets] = useState<NcSnippet[]>(() => loadSavedNcSnippets());
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(REPLACE_BATCHES_STORAGE_KEY, JSON.stringify(replaceBatches));
+    } catch {
+      // ignore
+    }
+  }, [replaceBatches]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(NC_SNIPPETS_STORAGE_KEY, JSON.stringify(snippets));
+    } catch {
+      // ignore
+    }
+  }, [snippets]);
+
+  const [displayOptions, setDisplayOptions] = useState<DisplayOptions>(() =>
+    loadSavedDisplayOptions(),
+  );
   const [parseResult, setParseResult] = useState<ParseResult | null>(null);
   const [parseError, setParseError] = useState<string | null>(null);
   const [isParsing, setIsParsing] = useState<boolean>(false);
 
   const [breakpoints, setBreakpoints] = useState<number[]>([]);
-  const [autoBreak, setAutoBreak] = useState<AutoBreakConfig>(DEFAULT_AUTO_BREAK);
+  const [autoBreak, setAutoBreak] = useState<AutoBreakConfig>(() => loadSavedAutoBreak());
   const [breakReason, setBreakReason] = useState<string | null>(null);
+
+  // 描画オプション全般（ファイル固有フィルタを除く）を自動永続化
+  useEffect(() => {
+    try {
+      const toSave = {
+        showRapid: displayOptions.showRapid,
+        showProgramPath: displayOptions.showProgramPath,
+        showCompensatedPath: displayOptions.showCompensatedPath,
+        showToolModel: displayOptions.showToolModel,
+        showToolWidthFill: displayOptions.showToolWidthFill,
+        showGrid: displayOptions.showGrid,
+        showBoundingBox: displayOptions.showBoundingBox,
+        colorByTool: displayOptions.colorByTool,
+        traceClipFuture: displayOptions.traceClipFuture,
+        viewLayout: displayOptions.viewLayout,
+        stock: displayOptions.stock,
+      };
+      window.localStorage.setItem(DISPLAY_OPTIONS_STORAGE_KEY, JSON.stringify(toSave));
+    } catch {
+      // ignore
+    }
+  }, [
+    displayOptions.showRapid,
+    displayOptions.showProgramPath,
+    displayOptions.showCompensatedPath,
+    displayOptions.showToolModel,
+    displayOptions.showToolWidthFill,
+    displayOptions.showGrid,
+    displayOptions.showBoundingBox,
+    displayOptions.colorByTool,
+    displayOptions.traceClipFuture,
+    displayOptions.viewLayout,
+    displayOptions.stock,
+  ]);
+
+  // 自動ブレイク条件を自動永続化
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(AUTO_BREAK_STORAGE_KEY, JSON.stringify(autoBreak));
+    } catch {
+      // ignore
+    }
+  }, [autoBreak]);
 
   // VS Code レイアウト（全ペイン開閉・サイズ・タブをローカル永続記憶）
   const initialLayoutRef = useRef<SavedUiLayout | null>(null);
@@ -387,7 +577,45 @@ export function App() {
   // トレース再生状態（デフォルト 30x、変更値はローカル記憶）
   const [activeSegmentIndex, setActiveSegmentIndex] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [editorFontSize, setEditorFontSize] = useState<number>(() => {
+    try {
+      const v = Number(window.localStorage.getItem(EDITOR_FONT_SIZE_STORAGE_KEY));
+      return Number.isFinite(v) && v >= 9 && v <= 24 ? v : 13;
+    } catch {
+      return 13;
+    }
+  });
+
+  const handleChangeEditorFontSize = useCallback((next: number) => {
+    const clamped = Math.min(24, Math.max(9, Math.round(next)));
+    setEditorFontSize(clamped);
+    try {
+      window.localStorage.setItem(EDITOR_FONT_SIZE_STORAGE_KEY, String(clamped));
+    } catch {
+      // ignore
+    }
+  }, []);
+
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(() => loadSavedPlaybackSpeed());
+  const [skipToolChangeTime, setSkipToolChangeTime] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem(SKIP_ATC_STORAGE_KEY) === "true";
+    } catch {
+      return false;
+    }
+  });
+
+  const handleToggleSkipToolChangeTime = useCallback(() => {
+    setSkipToolChangeTime((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(SKIP_ATC_STORAGE_KEY, String(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  }, []);
 
   const handleChangePlaybackSpeed = useCallback((speed: number) => {
     setPlaybackSpeed(speed);
@@ -491,40 +719,25 @@ export function App() {
     }, 3200);
   }, []);
 
-  // 初回サンプル読込
+  // Tauri 実行環境チェック
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      if (!isTauriRuntime()) {
-        setParseError(
-          "このアプリは Tauri デスクトップ環境（npm run tauri dev）で実行してください。",
-        );
-        return;
-      }
-      try {
-        const sample = await getSampleNc();
-        if (!cancelled) {
-          setSource(sample);
-          setFileName("sample_plate.nc (デモ)");
-          setFilePath(null);
-          setIsDirty(false);
-        }
-      } catch (err) {
-        if (!cancelled) setParseError(`サンプル読込エラー: ${String(err)}`);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    if (!isTauriRuntime()) {
+      setParseError(
+        "このアプリは Tauri デスクトップ環境（npm run tauri dev）で実行してください。",
+      );
+    }
   }, []);
 
   // OSウィンドウタイトルを現在のファイル名・未保存状態と同期
   useEffect(() => {
     if (!isTauriRuntime()) return;
+    const title = hasDocument
+      ? `${isDirty ? "● " : ""}${fileName} - TomboGCoder`
+      : "TomboGCoder — FANUC 3軸 NC Viewer";
     getCurrentWindow()
-      .setTitle(`${isDirty ? "● " : ""}${fileName} - TomboGCoder`)
+      .setTitle(title)
       .catch(() => {});
-  }, [fileName, isDirty]);
+  }, [hasDocument, fileName, isDirty]);
 
   // ウィンドウを閉じる際の未保存変更ガード
   useEffect(() => {
@@ -616,8 +829,8 @@ export function App() {
           setParseResult(res);
           setParseError(null);
           setActiveSegmentIndex((prev) => {
-            const maxIdx = Math.max(0, res.compensatedSegments.length - 1);
-            return prev === 0 ? maxIdx : Math.min(prev, maxIdx);
+            const total = res.compensatedSegments.length;
+            return prev <= 0 ? 0 : Math.min(prev, total);
           });
           // 新規ファイル読込・サンプル切替直後は、新boundingBox確定後に自動で全体センタリング
           if (pendingAutoFitRef.current && res.boundingBox.valid) {
@@ -680,6 +893,7 @@ export function App() {
         hiddenTools: [],
         hiddenDNumbers: [],
       }));
+      setHasDocument(true);
       setSource(file.content);
       setFilePath(file.path);
       setFileName(file.fileName);
@@ -703,6 +917,7 @@ export function App() {
         hiddenTools: [],
         hiddenDNumbers: [],
       }));
+      setHasDocument(true);
       setSource(NEW_NC_TEMPLATE);
       setFilePath(null);
       setFileName("untitled.nc");
@@ -714,6 +929,22 @@ export function App() {
       showToast("新規NCプログラムを作成しました");
     });
   }, [confirmIfDirty, showToast]);
+
+  const handleCloseDocument = useCallback(() => {
+    if (!hasDocumentRef.current) return;
+    confirmIfDirty("現在のファイルを閉じてスタート画面へ戻る", () => {
+      setIsPlaying(false);
+      setBreakReason(null);
+      setBreakpoints([]);
+      setHasDocument(false);
+      setSource("");
+      setFilePath(null);
+      setFileName("");
+      setParseResult(null);
+      setIsDirty(false);
+      setActiveSegmentIndex(0);
+    });
+  }, [confirmIfDirty]);
 
   const handleInsertExternalFile = useCallback(async () => {
     if (!isTauriRuntime()) return;
@@ -795,51 +1026,22 @@ export function App() {
   );
 
   const handleSaveFile = useCallback(() => {
+    if (!hasDocumentRef.current) return;
     void performSaveFile(false);
   }, [performSaveFile]);
 
   const handleSaveAsFile = useCallback(() => {
+    if (!hasDocumentRef.current) return;
     void performSaveFile(true);
   }, [performSaveFile]);
 
   const handleToggleEncoding = useCallback(() => {
+    if (!hasDocumentRef.current) return;
     const next = encoding === "Shift-JIS" ? "UTF-8" : "Shift-JIS";
     setEncoding(next);
     setIsDirty(true);
     showToast(`保存時の文字コードを ${next} に変更しました（Ctrl+S で保存反映）`);
   }, [encoding, showToast]);
-
-  const handleLoadSample = useCallback(
-    (mode: "plate" | "macro") => {
-      if (!isTauriRuntime()) return;
-      confirmIfDirty("サンプルプログラムを読み込む", async () => {
-        const sample = mode === "plate" ? await getSampleNc() : await getMacroSampleNc();
-        setIsPlaying(false);
-        setBreakReason(null);
-        setBreakpoints([]);
-        setDisplayOptions((prev) => ({
-          ...prev,
-          hiddenPrograms: [],
-          hiddenTools: [],
-          hiddenDNumbers: [],
-        }));
-        setSource(sample);
-        setFilePath(null);
-        setFileName(
-          mode === "plate" ? "sample_plate.nc (デモ)" : "sample_macro_b.nc (マクロデモ)",
-        );
-        setEncoding("UTF-8");
-        setIsDirty(false);
-        setActiveSegmentIndex(0);
-        if (mode === "macro") {
-          setBottomTab("macros");
-          setBottomCollapsed(false);
-        }
-        pendingAutoFitRef.current = true;
-      });
-    },
-    [confirmIfDirty],
-  );
 
   // チェック中の O番号だけで再集計したアクティブ結果（再生・加工時間・範囲・レポートすべてに連動）
   const effectiveResult = useMemo(
@@ -847,13 +1049,12 @@ export function App() {
     [parseResult, displayOptions.hiddenPrograms],
   );
 
-  // O番号チェック切替時は安全に再生停止し、新セグメント範囲へクランプ
+  // O番号チェック切替時は安全に再生停止し、加工終了後の全体表示 (0) へリセット
   useEffect(() => {
     if (!effectiveResult) return;
     setIsPlaying(false);
     setBreakReason(null);
-    const maxIdx = Math.max(0, effectiveResult.compensatedSegments.length - 1);
-    setActiveSegmentIndex(maxIdx);
+    setActiveSegmentIndex(0);
     // 絞り込み時は対象O番号へカメラフィット
     if (displayOptions.hiddenPrograms.length > 0 && effectiveResult.boundingBox.valid) {
       setCameraCommand((c) => ({ preset: "fit", seq: (c?.seq ?? 0) + 1 }));
@@ -864,9 +1065,11 @@ export function App() {
   const handleTogglePlay = useCallback(() => {
     if (!effectiveResult || effectiveResult.compensatedSegments.length === 0) return;
     setBreakReason(null);
+    const total = effectiveResult.compensatedSegments.length;
     setIsPlaying((playing) => {
-      if (!playing && activeSegmentIndex >= effectiveResult.compensatedSegments.length - 1) {
-        setActiveSegmentIndex(0);
+      if (!playing && (activeSegmentIndex <= 0 || activeSegmentIndex >= total)) {
+        // 0 (完了状態) または終端からの再生は 1ブロック目から加工スタート
+        setActiveSegmentIndex(1);
       }
       return !playing;
     });
@@ -1068,9 +1271,11 @@ export function App() {
     }
   }, [importMachineProfilesFromText]);
 
-  // ウィンドウへのファイル ドラッグ＆ドロップ監視（NC: 新規開く/挿入選択、JSON: マシン設定読込）
+  // ウィンドウへのファイル ドラッグ＆ドロップ監視（NC: スタート画面なら即開く / 編集中は新規or挿入選択、JSON: マシン設定読込）
   const importMachineRef = useRef(importMachineProfilesFromText);
   importMachineRef.current = importMachineProfilesFromText;
+  const applyOpenedFileRef = useRef(applyOpenedFile);
+  applyOpenedFileRef.current = applyOpenedFile;
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -1095,6 +1300,11 @@ export function App() {
               if (!active) return;
               if (file.fileName.toLowerCase().endsWith(".json")) {
                 importMachineRef.current(file.content);
+                return;
+              }
+              // スタートアップ画面表示中は確認モーダルを出さずにそのまま即開く
+              if (!hasDocumentRef.current) {
+                applyOpenedFileRef.current(file);
                 return;
               }
               const selection = ncEditorRef.current?.getSelectionInfo() ?? {
@@ -1169,6 +1379,170 @@ export function App() {
     [pendingDrop, editorOpen, showToast],
   );
 
+  const executeReplaceRules = useCallback(
+    (label: string, rulesToApply: ReplaceRule[]) => {
+      const res = applyReplaceRulesToText(source, rulesToApply);
+      if (res.error) {
+        setParseError(res.error);
+        return;
+      }
+      if (res.text === source) {
+        showToast(`「${label}」に一致する箇所がありませんでした`);
+        return;
+      }
+      if (!editorOpen) setEditorOpen(true);
+      const replaced = ncEditorRef.current?.replaceEntireDocument(res.text);
+      if (!replaced) {
+        setSource(res.text);
+        setIsDirty(true);
+      }
+      showToast(
+        `「${label}」を実行: ${res.appliedRules}ルールで ${res.hitCount}箇所を置換 (Ctrl+Z で元に戻せます)`,
+      );
+    },
+    [source, editorOpen, showToast],
+  );
+
+  const handleRunReplaceBatch = useCallback(
+    (batch: ReplaceBatch) => {
+      executeReplaceRules(batch.name, batch.rules);
+    },
+    [executeReplaceRules],
+  );
+
+  const handleApplySingleRule = useCallback(
+    (rule: ReplaceRule) => {
+      executeReplaceRules(rule.name, [{ ...rule, enabled: true }]);
+    },
+    [executeReplaceRules],
+  );
+
+  const handleExportReplaceBatches = useCallback(async () => {
+    if (!isTauriRuntime()) return;
+    try {
+      const payload = JSON.stringify(
+        {
+          app: "TomboGCoder",
+          format: "replace-batches",
+          version: 1,
+          exportedAt: new Date().toISOString(),
+          batches: replaceBatches,
+        },
+        null,
+        2,
+      );
+      const saved = await exportJsonFile(
+        "tombo_replace_batches.json",
+        payload,
+        "置換ルールセットを書き出し",
+      );
+      if (saved) showToast(`置換セット ${replaceBatches.length}件を書き出しました`);
+    } catch (err) {
+      setParseError(`置換セット書き出しエラー: ${String(err)}`);
+    }
+  }, [replaceBatches, showToast]);
+
+  const handleImportReplaceBatches = useCallback(async () => {
+    if (!isTauriRuntime()) return;
+    try {
+      const file = await openJsonFileDialog(
+        "置換ルール JSON または MIFES REPBATCH (.ini/.txt) を読み込み",
+        true,
+      );
+      if (!file) return;
+      const imported = parseImportedReplaceBatches(file.content);
+      setReplaceBatches((prev) => {
+        const next = [...prev];
+        for (const batch of imported) {
+          const idx = next.findIndex((x) => x.id === batch.id || x.name === batch.name);
+          if (idx >= 0) next[idx] = batch;
+          else next.push(batch);
+        }
+        return next;
+      });
+      const totalRules = imported.reduce((acc, b) => acc + b.rules.length, 0);
+      showToast(`置換セット ${imported.length}件（計${totalRules}ルール）を読み込みました`);
+    } catch (err) {
+      setParseError(`置換セット読み込みエラー: ${String(err)}`);
+    }
+  }, [showToast]);
+
+  const handleInsertSnippet = useCallback(
+    (snippet: NcSnippet) => {
+      if (!editorOpen) setEditorOpen(true);
+      const inserted = ncEditorRef.current?.insertAtSelection(snippet.body);
+      if (!inserted) {
+        setSource((prev) => (prev ? `${prev}\n${snippet.body}` : snippet.body));
+        setIsDirty(true);
+      }
+      showToast(`定型文を挿入しました: ${snippet.name} (Ctrl+Z で元に戻せます)`);
+    },
+    [editorOpen, showToast],
+  );
+
+  const handleExportSnippets = useCallback(async () => {
+    if (!isTauriRuntime()) return;
+    try {
+      const payload = JSON.stringify(
+        {
+          app: "TomboGCoder",
+          format: "nc-snippets",
+          version: 1,
+          exportedAt: new Date().toISOString(),
+          snippets,
+        },
+        null,
+        2,
+      );
+      const saved = await exportJsonFile("tombo_nc_snippets.json", payload, "定型文集を書き出し");
+      if (saved) showToast(`定型文 ${snippets.length}件を書き出しました`);
+    } catch (err) {
+      setParseError(`定型文書き出しエラー: ${String(err)}`);
+    }
+  }, [snippets, showToast]);
+
+  const handleImportSnippets = useCallback(async () => {
+    if (!isTauriRuntime()) return;
+    try {
+      const file = await openJsonFileDialog("定型文集 JSON を読み込み");
+      if (!file) return;
+      const parsed = JSON.parse(file.content) as unknown;
+      const rawList = Array.isArray(parsed)
+        ? parsed
+        : parsed &&
+            typeof parsed === "object" &&
+            Array.isArray((parsed as { snippets?: unknown }).snippets)
+          ? (parsed as { snippets: unknown[] }).snippets
+          : [];
+      const valid: NcSnippet[] = rawList
+        .filter(
+          (x): x is Partial<NcSnippet> =>
+            Boolean(x && typeof x === "object" && typeof (x as NcSnippet).body === "string"),
+        )
+        .map((s, i) => ({
+          id: s.id && typeof s.id === "string" ? s.id : `snip-imp-${Date.now()}-${i}`,
+          name: s.name && typeof s.name === "string" ? s.name : `定型文 ${i + 1}`,
+          category: s.category && typeof s.category === "string" ? s.category : "共通",
+          body: s.body ?? "",
+        }));
+      if (valid.length === 0) {
+        throw new Error("有効な定型文が見つかりませんでした");
+      }
+      setSnippets((prev) => {
+        const next = [...prev];
+        for (const item of valid) {
+          const idx = next.findIndex((x) => x.name === item.name);
+          if (idx >= 0) next[idx] = item;
+          else next.push(item);
+        }
+        return next;
+      });
+      showToast(`定型文 ${valid.length}件を読み込みました`);
+    } catch (err) {
+      setParseError(`定型文読み込みエラー: ${String(err)}`);
+    }
+  }, [showToast]);
+
   const handleExportCsv = useCallback(async () => {
     if (!effectiveResult || !isTauriRuntime()) return;
     try {
@@ -1230,6 +1604,11 @@ export function App() {
         }
         return;
       }
+      if (mod && e.key.toLowerCase() === "w") {
+        e.preventDefault();
+        handleCloseDocument();
+        return;
+      }
       if (mod && e.key.toLowerCase() === "b") {
         e.preventDefault();
         setSidebarOpen((v) => !v);
@@ -1261,9 +1640,8 @@ export function App() {
         e.preventDefault();
         setIsPlaying(false);
         setBreakReason(null);
-        setActiveSegmentIndex((prev) =>
-          Math.min(Math.max(0, (effectiveResult?.compensatedSegments.length ?? 1) - 1), prev + 1),
-        );
+        const total = effectiveResult?.compensatedSegments.length ?? 0;
+        setActiveSegmentIndex((prev) => Math.min(total, prev + 1));
       } else if (e.key === "ArrowLeft") {
         e.preventDefault();
         setIsPlaying(false);
@@ -1280,6 +1658,7 @@ export function App() {
     handleOpenFile,
     handleSaveFile,
     handleSaveAsFile,
+    handleCloseDocument,
     handleTogglePlay,
     effectiveResult,
     helpModal,
@@ -1295,7 +1674,7 @@ export function App() {
       if (exactIdx >= 0) {
         setIsPlaying(false);
         setBreakReason(null);
-        setActiveSegmentIndex(exactIdx);
+        setActiveSegmentIndex(exactIdx + 1);
         return;
       }
       let nearestIdx = -1;
@@ -1306,7 +1685,7 @@ export function App() {
       if (nearestIdx >= 0) {
         setIsPlaying(false);
         setBreakReason(null);
-        setActiveSegmentIndex(nearestIdx);
+        setActiveSegmentIndex(nearestIdx + 1);
       }
     },
     [effectiveResult],
@@ -1321,11 +1700,25 @@ export function App() {
     }
   };
 
-  const activeSegment = effectiveResult?.compensatedSegments[activeSegmentIndex] ?? null;
+  // activeSegmentIndex: 0 = 加工終了後(全体表示), 1..N = 各ブロック実行状態
+  const activeSegment = useMemo(() => {
+    const segs = effectiveResult?.compensatedSegments;
+    if (!segs || segs.length === 0) return null;
+    if (activeSegmentIndex <= 0) return segs[segs.length - 1];
+    return segs[Math.min(segs.length - 1, activeSegmentIndex - 1)] ?? null;
+  }, [effectiveResult, activeSegmentIndex]);
+  const activeEditorLine = activeSegmentIndex > 0 ? (activeSegment?.lineNumber ?? null) : null;
   const errorCount =
     effectiveResult?.diagnostics.filter((d) => d.severity === "error").length ?? 0;
   const warnCount =
     effectiveResult?.diagnostics.filter((d) => d.severity === "warning").length ?? 0;
+
+  const fileStats = useMemo(() => {
+    const charCountNoNewline = source.replace(/\r?\n/g, "").length;
+    const lineCount = source ? source.split(/\r?\n/).length : 0;
+    const programCount = parseResult?.detectedPrograms.length ?? 0;
+    return { programCount, charCountNoNewline, lineCount };
+  }, [source, parseResult]);
 
   const programFilterLabel = useMemo(() => {
     if (!parseResult || displayOptions.hiddenPrograms.length === 0) return null;
@@ -1339,6 +1732,7 @@ export function App() {
     <div className="h-screen w-screen flex flex-col bg-[#1f1f1f] text-[#cccccc] overflow-hidden">
       <TopBar
         isMac={isMac}
+        hasDocument={hasDocument}
         fileName={fileName}
         filePath={filePath}
         encoding={encoding}
@@ -1361,8 +1755,8 @@ export function App() {
         onClearRecentFiles={handleClearRecentFiles}
         onSaveFile={handleSaveFile}
         onSaveAsFile={handleSaveAsFile}
+        onCloseDocument={handleCloseDocument}
         onToggleEncoding={handleToggleEncoding}
-        onLoadSample={handleLoadSample}
         onToggleWatchExternal={() => setWatchExternal((v) => !v)}
         onExportCsv={handleExportCsv}
         onExportHtml={handleExportHtml}
@@ -1384,6 +1778,10 @@ export function App() {
           ncEditorRef.current?.selectAll();
         }}
         onInsertExternalFile={handleInsertExternalFile}
+        onOpenEditToolsPanel={() => {
+          setSidebarTab("edit");
+          setSidebarOpen(true);
+        }}
         onToggleSidebar={() => setSidebarOpen((v) => !v)}
         onToggleEditor={() => setEditorOpen((v) => !v)}
         onToggleBottom={() => setBottomCollapsed((v) => !v)}
@@ -1411,8 +1809,8 @@ export function App() {
         onStepSim={(delta) => {
           setIsPlaying(false);
           setBreakReason(null);
-          const maxIdx = Math.max(0, (effectiveResult?.compensatedSegments.length ?? 1) - 1);
-          setActiveSegmentIndex((prev) => Math.max(0, Math.min(maxIdx, prev + delta)));
+          const total = effectiveResult?.compensatedSegments.length ?? 0;
+          setActiveSegmentIndex((prev) => Math.max(0, Math.min(total, prev + delta)));
         }}
         onClearBreakpoints={() => setBreakpoints([])}
         onOpenBottomTab={(tab) => {
@@ -1443,8 +1841,9 @@ export function App() {
         <aside className="w-12 bg-[#181818] border-r border-[#2b2b2b] flex flex-col items-center py-2 gap-1 shrink-0">
           {(
             [
-              ["filter", Layers, "表示フィルタ・O番号・Zスライス (Cmd/Ctrl+B)"],
-              ["machine", Settings, "マシン設定 (工具マガジン・径補正・機械仕様)"],
+              ["filter", Layers, "表示フィルタ・透過ストック・Zスライス (Cmd/Ctrl+B)"],
+              ["machine", Settings, "マシン設定 (工具マガジン・径補正・仕様・Sim置換)"],
+              ["edit", Wand2, "正規表現置換ルール & 定型文入力"],
               ["debug", Bug, "ブレイクポイント & 自動停止条件"],
             ] as const
           ).map(([tab, Icon, title]) => {
@@ -1494,6 +1893,17 @@ export function App() {
                 onExportActiveMachineProfile={handleExportActiveMachineProfile}
                 onExportAllMachineProfiles={handleExportAllMachineProfiles}
                 onImportMachineProfiles={handleImportMachineProfiles}
+                replaceBatches={replaceBatches}
+                onUpdateReplaceBatches={setReplaceBatches}
+                onRunReplaceBatch={handleRunReplaceBatch}
+                onApplySingleRule={handleApplySingleRule}
+                onExportReplaceBatches={handleExportReplaceBatches}
+                onImportReplaceBatches={handleImportReplaceBatches}
+                snippets={snippets}
+                onUpdateSnippets={setSnippets}
+                onInsertSnippet={handleInsertSnippet}
+                onExportSnippets={handleExportSnippets}
+                onImportSnippets={handleImportSnippets}
                 breakpoints={breakpoints}
                 onToggleBreakpoint={handleToggleBreakpoint}
                 onClearBreakpoints={() => setBreakpoints([])}
@@ -1515,7 +1925,24 @@ export function App() {
 
         {/* 右メインワークスペース */}
         <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
-          <div ref={splitContainerRef} className="flex-1 flex min-h-0 overflow-hidden">
+          {!hasDocument ? (
+            <WelcomeScreen
+              isMac={isMac}
+              activeMachineProfile={activeMachineProfile}
+              recentFiles={recentFiles}
+              onOpenFile={handleOpenFile}
+              onNewFile={handleNewFile}
+              onOpenRecentFile={handleOpenRecentFile}
+              onClearRecentFiles={handleClearRecentFiles}
+              onOpenMachineSettings={() => {
+                setSidebarTab("machine");
+                setSidebarOpen(true);
+              }}
+              onOpenShortcuts={() => setHelpModal("shortcuts")}
+            />
+          ) : (
+            <>
+              <div ref={splitContainerRef} className="flex-1 flex min-h-0 overflow-hidden">
             {/* 左ペイン：NCコードエディタ（ワンクリックで折りたたみ可能） */}
             {editorOpen && (
               <>
@@ -1523,24 +1950,57 @@ export function App() {
                   style={{ width: `${editorRatio * 100}%` }}
                   className="h-full flex flex-col min-w-[200px] border-r border-[#2b2b2b]"
                 >
-                  <div className="h-8 bg-[#181818] border-b border-[#2b2b2b] px-3 flex items-center justify-between text-[11.5px] shrink-0">
+                  <div className="h-8 bg-[#181818] border-b border-[#2b2b2b] px-2.5 flex items-center justify-between gap-2 text-[11.5px] shrink-0">
                     <span className="font-mono text-[#e2e8f0] truncate">{fileName}</span>
-                    <span className="text-[10.5px] text-[#787878] font-mono">
-                      {parseResult?.lineCount ?? 0} 行
-                      {parseResult && parseResult.expandedBlockCount > parseResult.lineCount
-                        ? ` → 展開 ${parseResult.expandedBlockCount}`
-                        : ""}
-                    </span>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <span className="text-[10px] text-[#787878] font-mono hidden sm:inline">
+                        {fileStats.lineCount}行
+                        {parseResult && parseResult.expandedBlockCount > parseResult.lineCount
+                          ? `→${parseResult.expandedBlockCount}`
+                          : ""}
+                      </span>
+                      <button
+                        onClick={() => ncEditorRef.current?.openSearch()}
+                        className="p-1 rounded hover:bg-[#2d2d30] text-[#94a3b8] hover:text-white transition-colors"
+                        title="検索・置換パネルを開く (Cmd/Ctrl+F)"
+                      >
+                        <Search className="w-3 h-3" />
+                      </button>
+                      <div className="flex items-center bg-[#222224] border border-[#323234] rounded text-[10px] font-mono">
+                        <button
+                          onClick={() => handleChangeEditorFontSize(editorFontSize - 1)}
+                          className="px-1.5 py-0.5 hover:bg-[#323236] text-[#cbd5e1] hover:text-white rounded-l"
+                          title="文字サイズを小さく"
+                        >
+                          A-
+                        </button>
+                        <button
+                          onClick={() => handleChangeEditorFontSize(13)}
+                          className="px-1 py-0.5 text-[#9cdcfe] hover:text-white border-x border-[#323234]"
+                          title="クリックで標準サイズ (13px) に戻す"
+                        >
+                          {editorFontSize}
+                        </button>
+                        <button
+                          onClick={() => handleChangeEditorFontSize(editorFontSize + 1)}
+                          className="px-1.5 py-0.5 hover:bg-[#323236] text-[#cbd5e1] hover:text-white rounded-r"
+                          title="文字サイズを大きく"
+                        >
+                          A+
+                        </button>
+                      </div>
+                    </div>
                   </div>
                   <div className="flex-1 min-h-0">
                     <NcEditor
                       ref={ncEditorRef}
                       value={source}
+                      fontSize={editorFontSize}
                       onChange={(val) => {
                         setSource(val);
                         setIsDirty(true);
                       }}
-                      activeLine={activeSegment?.lineNumber ?? null}
+                      activeLine={activeEditorLine}
                       diagnostics={effectiveResult?.diagnostics ?? []}
                       breakpoints={breakpoints}
                       onToggleBreakpoint={handleToggleBreakpoint}
@@ -1591,6 +2051,8 @@ export function App() {
                 onStopPlay={() => setIsPlaying(false)}
                 playbackSpeed={playbackSpeed}
                 onChangePlaybackSpeed={handleChangePlaybackSpeed}
+                skipToolChangeTime={skipToolChangeTime}
+                onToggleSkipToolChangeTime={handleToggleSkipToolChangeTime}
                 breakpoints={breakpoints}
                 autoBreak={autoBreak}
                 breakReason={breakReason}
@@ -1625,12 +2087,15 @@ export function App() {
             heightPx={bottomHeight}
             onToggleCollapse={() => setBottomCollapsed((v) => !v)}
             parseResult={effectiveResult}
+            fileStats={fileStats}
             activeSegment={activeSegment}
             programFilterLabel={programFilterLabel}
             onJumpToLine={jumpToLine}
             onExportCsv={handleExportCsv}
             onExportHtml={handleExportHtml}
           />
+            </>
+          )}
         </div>
       </div>
 

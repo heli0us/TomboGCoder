@@ -31,6 +31,7 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
         </div>
         {(
           [
+            ["onM00", "M00 (プログラムストップ) で自動停止"],
             ["onToolChange", "工具交換 (M06 / T変更) で自動停止"],
             ["onZPlunge", "Zマイナス突入 (ワーク切込) で自動停止"],
             ["onCompChange", "径補正 (G41/G42/G40) 切替で自動停止"],

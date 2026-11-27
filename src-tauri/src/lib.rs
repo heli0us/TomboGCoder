@@ -7,14 +7,72 @@ mod simulator;
 
 use encoding_rs::{SHIFT_JIS, UTF_8};
 use models::{FileReadResult, NcParseRequest, ParseResult};
+use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
-use tauri::{AppHandle, Emitter, State};
-#[cfg(not(target_os = "macos"))]
-use tauri::Manager;
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WindowEvent};
+
+/// ウィンドウ位置・サイズ・最大化状態の永続化構造体
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SavedWindowState {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    maximized: bool,
+}
+
+fn window_state_file_path(app: &AppHandle) -> Option<PathBuf> {
+    let dir = app.path().app_config_dir().ok()?;
+    let _ = fs::create_dir_all(&dir);
+    Some(dir.join("window-state.json"))
+}
+
+fn load_window_state(path: &Path) -> Option<SavedWindowState> {
+    let text = fs::read_to_string(path).ok()?;
+    serde_json::from_str::<SavedWindowState>(&text).ok()
+}
+
+fn save_window_state(path: &Path, state: &SavedWindowState) {
+    if let Ok(json) = serde_json::to_string_pretty(state) {
+        let _ = fs::write(path, json);
+    }
+}
+
+/// 保存されたウィンドウ位置が現在の利用可能モニター群のいずれかと交差するか検証（画面外迷子防止）
+fn is_position_visible_on_monitors(
+    window: &tauri::WebviewWindow,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> bool {
+    let Ok(monitors) = window.available_monitors() else {
+        return true;
+    };
+    if monitors.is_empty() {
+        return true;
+    }
+    let w_right = x.saturating_add(width as i32);
+    let w_bottom = y.saturating_add(height as i32);
+    monitors.iter().any(|m| {
+        let pos = m.position();
+        let size = m.size();
+        let m_left = pos.x;
+        let m_top = pos.y;
+        let m_right = m_left.saturating_add(size.width as i32);
+        let m_bottom = m_top.saturating_add(size.height as i32);
+        // 少なくともタイトルバー領域（上端）がモニター内に収まっているか
+        w_right > m_left + 80
+            && x < m_right - 80
+            && y >= m_top - 20
+            && y < m_bottom - 60
+            && w_bottom > m_top + 60
+    })
+}
 
 /// 外部エディタ連動のファイル監視状態
 #[derive(Default)]
@@ -287,13 +345,71 @@ pub fn run() {
         .manage(WatchState::default())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            // Windows / Linux では OS 標準タイトルバーを外してカスタム一体型タイトルバーにする
-            // （macOS は tauri.conf.json の titleBarStyle: Overlay でトラフィックライト付き一体型）
-            #[cfg(not(target_os = "macos"))]
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_decorations(false);
+                // Windows / Linux では OS 標準タイトルバーを外してカスタム一体型タイトルバーにする
+                // （macOS は tauri.conf.json の titleBarStyle: Overlay でトラフィックライト付き一体型）
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let _ = window.set_decorations(false);
+                }
+
+                // 前回のウィンドウサイズ・位置・最大化状態を復元
+                let state_path = window_state_file_path(app.handle());
+                let initial_state = state_path
+                    .as_deref()
+                    .and_then(load_window_state)
+                    .filter(|s| s.width >= 640 && s.height >= 480);
+
+                if let Some(ref s) = initial_state {
+                    let _ = window.set_size(PhysicalSize::new(s.width, s.height));
+                    if is_position_visible_on_monitors(&window, s.x, s.y, s.width, s.height) {
+                        let _ = window.set_position(PhysicalPosition::new(s.x, s.y));
+                    }
+                    if s.maximized {
+                        let _ = window.maximize();
+                    }
+                }
+
+                // ウィンドウ移動・リサイズ・終了時に状態を自動保存（最小化時の異常座標は無視）
+                if let Some(path) = state_path {
+                    let current = Arc::new(Mutex::new(initial_state.unwrap_or(SavedWindowState {
+                        x: 100,
+                        y: 100,
+                        width: 1440,
+                        height: 900,
+                        maximized: false,
+                    })));
+                    let win_clone = window.clone();
+                    let state_clone = Arc::clone(&current);
+                    window.on_window_event(move |event| match event {
+                        WindowEvent::Moved(_)
+                        | WindowEvent::Resized(_)
+                        | WindowEvent::CloseRequested { .. } => {
+                            if win_clone.is_minimized().unwrap_or(false) {
+                                return;
+                            }
+                            let is_max = win_clone.is_maximized().unwrap_or(false);
+                            if let Ok(mut guard) = state_clone.lock() {
+                                guard.maximized = is_max;
+                                if !is_max {
+                                    if let Ok(pos) = win_clone.outer_position() {
+                                        guard.x = pos.x;
+                                        guard.y = pos.y;
+                                    }
+                                    if let Ok(size) = win_clone.inner_size() {
+                                        if size.width >= 640 && size.height >= 480 {
+                                            guard.width = size.width;
+                                            guard.height = size.height;
+                                        }
+                                    }
+                                }
+                                save_window_state(&path, &guard);
+                            }
+                        }
+                        _ => {}
+                    });
+                }
             }
-            let _ = app;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -501,5 +617,52 @@ G00 X0. Y0. Z10.
         assert!((segs[2].end.x - 0.0).abs() < 1e-6);
         assert!((segs[2].end.y - 0.0).abs() < 1e-6);
         assert!((segs[2].end.z - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_duplicate_o_number_warning_and_m00_segment() {
+        let nc = r#"%
+O1001
+G90 G00 X0. Y0. Z10.
+M00 (CHECK WORK)
+G01 X20. Y0. F300.
+M30
+O1001
+G90 G00 X10. Y10. Z10.
+M30
+%"#;
+        let cfg = MachineConfig::default();
+        let res = simulator::simulate_nc(nc, &cfg, None);
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.code == "DUPLICATE_PROGRAM_NUMBER" && d.line_number == 7),
+            "O番号重複警告が検出されていません: {:?}",
+            res.diagnostics
+        );
+        assert!(
+            res.compensated_segments
+                .iter()
+                .any(|s| s.has_m00 && s.line_number == 4),
+            "M00セグメントが検出されていません"
+        );
+    }
+
+    #[test]
+    fn test_g92_with_g52_does_not_double_shift() {
+        let nc = r#"
+G90 G54 G17 G21
+G52 X50. Y20.
+G00 X203.2 Y-10. Z10.
+G91 X0. Y0.
+G92 X203.2 Y-10.
+G90 G01 X210. Y0. F300.
+"#;
+        let cfg = MachineConfig::default();
+        let res = simulator::simulate_nc(nc, &cfg, None);
+        let last = res.program_segments.last().unwrap();
+        // G52 X50 Y20 下での G90 X210 Y0 -> (260, 20) になり、二重シフトしないこと
+        assert!((last.end.x - 260.0).abs() < 1e-6, "X={}", last.end.x);
+        assert!((last.end.y - 20.0).abs() < 1e-6, "Y={}", last.end.y);
     }
 }

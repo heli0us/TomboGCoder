@@ -1,6 +1,12 @@
 import React, { useMemo, useState } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
-import { type DisplayOptions, type ParseResult, formatDuration, getToolColor } from "../../types/nc";
+import { Box, ChevronDown, ChevronRight, Circle, Sparkles } from "lucide-react";
+import {
+  type DisplayOptions,
+  type ParseResult,
+  type StockConfig,
+  formatDuration,
+  getToolColor,
+} from "../../types/nc";
 import { computeProgramStats } from "../../utils/filterResult";
 
 interface FilterPanelProps {
@@ -59,7 +65,6 @@ const TOGGLE_ITEMS: ReadonlyArray<{
     | "showToolWidthFill"
     | "showRapid"
     | "showToolModel"
-    | "quadView"
     | "showGrid"
     | "showBoundingBox"
     | "colorByTool"
@@ -71,10 +76,9 @@ const TOGGLE_ITEMS: ReadonlyArray<{
 }> = [
   { key: "showCompensatedPath", label: "補正後パス", title: "実工具中心パスを表示" },
   { key: "showProgramPath", label: "補正前比較", title: "G41/G42 補正前パスを重ね表示", accent: "#e879f9" },
-  { key: "showToolWidthFill", label: "工具幅塗潰", title: "T工具径の幅で切削領域を塗りつぶし" },
+  { key: "showToolWidthFill", label: "工具径輪郭", title: "T工具径の外周アウトライン（切削幅輪郭線）を表示" },
   { key: "showRapid", label: "早送り G00", title: "早送りパス (G00) を表示", accent: "#f87171" },
   { key: "showToolModel", label: "3D工具", title: "現在位置に3D工具モデルを表示" },
-  { key: "quadView", label: "4面図", title: "XY / XZ / YZ / ISO 同時表示" },
   { key: "showGrid", label: "グリッド", title: "XY基準グリッドを表示" },
   { key: "showBoundingBox", label: "加工範囲枠", title: "XYZバウンディングボックスを表示", accent: "#fbbf24" },
   { key: "colorByTool", label: "工具別色分", title: "工具番号 (T) ごとに色を分ける", accent: "#4ade80" },
@@ -88,10 +92,49 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
   onFocusProgram,
 }) => {
   const [openDraw, setOpenDraw] = useState(true);
+  const [openStock, setOpenStock] = useState(false);
   const [openPrograms, setOpenPrograms] = useState(true);
   const [openTools, setOpenTools] = useState(true);
   const [openDNums, setOpenDNums] = useState(false);
   const [openZSlice, setOpenZSlice] = useState(false);
+
+  const updateStock = (patch: Partial<StockConfig>) => {
+    onUpdateDisplayOptions({ stock: { ...displayOptions.stock, ...patch } });
+  };
+
+  const fitStockToBoundingBox = () => {
+    const bb = parseResult?.boundingBox;
+    if (!bb || !bb.valid) return;
+    const minX = Math.floor(bb.min.x);
+    const maxX = Math.ceil(bb.max.x);
+    const minY = Math.floor(bb.min.y);
+    const maxY = Math.ceil(bb.max.y);
+    const minZ = Math.floor(bb.min.z);
+    const sx = Math.max(10, maxX - minX);
+    const sy = Math.max(10, maxY - minY);
+    const topZ = 0;
+    const sz = Math.max(5, Math.ceil(topZ - Math.min(minZ, -5)));
+    if (displayOptions.stock.shape === "cylinder") {
+      updateStock({
+        enabled: true,
+        diameter: Math.ceil(Math.max(sx, sy)),
+        sizeZ: sz,
+        originX: Number(((minX + maxX) * 0.5).toFixed(2)),
+        originY: Number(((minY + maxY) * 0.5).toFixed(2)),
+        topZ,
+      });
+    } else {
+      updateStock({
+        enabled: true,
+        sizeX: sx,
+        sizeY: sy,
+        sizeZ: sz,
+        originX: minX,
+        originY: minY,
+        topZ,
+      });
+    }
+  };
 
   const programStats = useMemo(() => computeProgramStats(parseResult), [parseResult]);
 
@@ -174,6 +217,203 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
               </button>
             );
           })}
+        </div>
+
+        {/* 画面分割モード (1面 / 3画面 / 4面) */}
+        <div className="mt-2 grid grid-cols-3 bg-[#1c1c1e] border border-[#2a2a2d] rounded-md p-0.5 text-[10.5px]">
+          {(
+            [
+              ["single", "1面"],
+              ["triple", "3画面"],
+              ["quad", "4面図"],
+            ] as const
+          ).map(([mode, label]) => (
+            <button
+              key={mode}
+              onClick={() => onUpdateDisplayOptions({ viewLayout: mode })}
+              className={`py-1 rounded font-medium transition-colors ${
+                displayOptions.viewLayout === mode
+                  ? "bg-[#0078d4] text-white"
+                  : "text-[#8e95a2] hover:text-white"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </AccordionSection>
+
+      {/* 1.5. 透過ストック (ワーク素材表示) */}
+      <AccordionSection
+        title="透過ストック (素材)"
+        badge={displayOptions.stock.enabled ? "ON" : undefined}
+        open={openStock || displayOptions.stock.enabled}
+        onToggle={() => setOpenStock((v) => !v)}
+        actions={
+          <input
+            type="checkbox"
+            checked={displayOptions.stock.enabled}
+            onChange={(e) => {
+              const enabled = e.target.checked;
+              if (enabled) setOpenStock(true);
+              updateStock({ enabled });
+            }}
+            className="accent-[#0078d4] cursor-pointer"
+            title="透過ストック(ワーク素材)を3D表示"
+          />
+        }
+      >
+        <div className="bg-[#1e1e1e] border border-[#2f2f32] rounded-md p-2.5 space-y-2 text-[11px]">
+          <div className="flex items-center justify-between gap-1.5">
+            <div className="grid grid-cols-2 bg-[#252526] border border-[#3c3c3c] rounded p-0.5 flex-1">
+              <button
+                onClick={() => updateStock({ shape: "box" })}
+                className={`py-0.5 rounded flex items-center justify-center gap-1 text-[10.5px] transition-colors ${
+                  displayOptions.stock.shape === "box"
+                    ? "bg-[#0078d4] text-white"
+                    : "text-[#8e95a2] hover:text-white"
+                }`}
+              >
+                <Box className="w-3 h-3" /> 四角
+              </button>
+              <button
+                onClick={() => updateStock({ shape: "cylinder" })}
+                className={`py-0.5 rounded flex items-center justify-center gap-1 text-[10.5px] transition-colors ${
+                  displayOptions.stock.shape === "cylinder"
+                    ? "bg-[#0078d4] text-white"
+                    : "text-[#8e95a2] hover:text-white"
+                }`}
+              >
+                <Circle className="w-3 h-3" /> 丸
+              </button>
+            </div>
+            <button
+              onClick={fitStockToBoundingBox}
+              disabled={!parseResult?.boundingBox.valid}
+              className="px-2 py-1 rounded bg-[#252526] hover:bg-[#323234] border border-[#3c3c3c] text-[#9cdcfe] disabled:opacity-40 flex items-center gap-1 text-[10.5px] shrink-0"
+              title="現在の加工軌道の外接範囲からストック寸法を自動設定"
+            >
+              <Sparkles className="w-3 h-3" /> 自動
+            </button>
+          </div>
+
+          {displayOptions.stock.shape === "box" ? (
+            <div className="grid grid-cols-3 gap-1.5 font-mono">
+              <label className="space-y-0.5">
+                <span className="text-[9.5px] text-[#8e95a2]">X幅</span>
+                <input
+                  type="number"
+                  min={1}
+                  step={5}
+                  value={displayOptions.stock.sizeX}
+                  onChange={(e) => updateStock({ sizeX: Math.max(1, parseFloat(e.target.value) || 0) })}
+                  className="w-full bg-[#252526] border border-[#3c3c3c] rounded px-1.5 py-0.5 text-right text-white text-[11px]"
+                />
+              </label>
+              <label className="space-y-0.5">
+                <span className="text-[9.5px] text-[#8e95a2]">Y奥行</span>
+                <input
+                  type="number"
+                  min={1}
+                  step={5}
+                  value={displayOptions.stock.sizeY}
+                  onChange={(e) => updateStock({ sizeY: Math.max(1, parseFloat(e.target.value) || 0) })}
+                  className="w-full bg-[#252526] border border-[#3c3c3c] rounded px-1.5 py-0.5 text-right text-white text-[11px]"
+                />
+              </label>
+              <label className="space-y-0.5">
+                <span className="text-[9.5px] text-[#8e95a2]">Z厚み</span>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={displayOptions.stock.sizeZ}
+                  onChange={(e) => updateStock({ sizeZ: Math.max(1, parseFloat(e.target.value) || 0) })}
+                  className="w-full bg-[#252526] border border-[#3c3c3c] rounded px-1.5 py-0.5 text-right text-white text-[11px]"
+                />
+              </label>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-1.5 font-mono">
+              <label className="space-y-0.5">
+                <span className="text-[9.5px] text-[#8e95a2]">外径 Ø (mm)</span>
+                <input
+                  type="number"
+                  min={1}
+                  step={5}
+                  value={displayOptions.stock.diameter}
+                  onChange={(e) =>
+                    updateStock({ diameter: Math.max(1, parseFloat(e.target.value) || 0) })
+                  }
+                  className="w-full bg-[#252526] border border-[#3c3c3c] rounded px-1.5 py-0.5 text-right text-white text-[11px]"
+                />
+              </label>
+              <label className="space-y-0.5">
+                <span className="text-[9.5px] text-[#8e95a2]">高さ Z (mm)</span>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={displayOptions.stock.sizeZ}
+                  onChange={(e) => updateStock({ sizeZ: Math.max(1, parseFloat(e.target.value) || 0) })}
+                  className="w-full bg-[#252526] border border-[#3c3c3c] rounded px-1.5 py-0.5 text-right text-white text-[11px]"
+                />
+              </label>
+            </div>
+          )}
+
+          <div className="grid grid-cols-3 gap-1.5 font-mono">
+            <label className="space-y-0.5">
+              <span className="text-[9.5px] text-[#8e95a2]">
+                {displayOptions.stock.shape === "box" ? "基準X" : "中心X"}
+              </span>
+              <input
+                type="number"
+                step={5}
+                value={displayOptions.stock.originX}
+                onChange={(e) => updateStock({ originX: parseFloat(e.target.value) || 0 })}
+                className="w-full bg-[#252526] border border-[#3c3c3c] rounded px-1.5 py-0.5 text-right text-white text-[11px]"
+              />
+            </label>
+            <label className="space-y-0.5">
+              <span className="text-[9.5px] text-[#8e95a2]">
+                {displayOptions.stock.shape === "box" ? "基準Y" : "中心Y"}
+              </span>
+              <input
+                type="number"
+                step={5}
+                value={displayOptions.stock.originY}
+                onChange={(e) => updateStock({ originY: parseFloat(e.target.value) || 0 })}
+                className="w-full bg-[#252526] border border-[#3c3c3c] rounded px-1.5 py-0.5 text-right text-white text-[11px]"
+              />
+            </label>
+            <label className="space-y-0.5">
+              <span className="text-[9.5px] text-[#8e95a2]">上面Z</span>
+              <input
+                type="number"
+                step={1}
+                value={displayOptions.stock.topZ}
+                onChange={(e) => updateStock({ topZ: parseFloat(e.target.value) || 0 })}
+                className="w-full bg-[#252526] border border-[#3c3c3c] rounded px-1.5 py-0.5 text-right text-white text-[11px]"
+              />
+            </label>
+          </div>
+
+          <label className="flex items-center gap-2 text-[10px] text-[#94a3b8]">
+            <span className="shrink-0">透過度</span>
+            <input
+              type="range"
+              min={0.05}
+              max={0.55}
+              step={0.05}
+              value={displayOptions.stock.opacity}
+              onChange={(e) => updateStock({ opacity: parseFloat(e.target.value) })}
+              className="flex-1 accent-[#38bdf8] h-1"
+            />
+            <span className="font-mono w-7 text-right">
+              {Math.round(displayOptions.stock.opacity * 100)}%
+            </span>
+          </label>
         </div>
       </AccordionSection>
 
