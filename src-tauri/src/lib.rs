@@ -344,6 +344,8 @@ pub fn run() {
     tauri::Builder::default()
         .manage(WatchState::default())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 // Windows / Linux では OS 標準タイトルバーを外してカスタム一体型タイトルバーにする

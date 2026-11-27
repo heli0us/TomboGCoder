@@ -1,5 +1,6 @@
 import React from "react";
 import { Cpu, FileCode2, Keyboard, Mouse, X } from "lucide-react";
+import pkg from "../../package.json";
 
 interface HelpModalProps {
   mode: "shortcuts" | "about";
@@ -138,7 +139,7 @@ export const HelpModal: React.FC<HelpModalProps> = ({ mode, isMac, onClose }) =>
               <div>
                 <div className="text-base font-bold text-white tracking-tight">TomboGCoder</div>
                 <div className="text-[11.5px] text-[#94a3b8]">
-                  Version 0.1.0 — FANUC 3軸マシニングセンタ向け NCビューア &amp; 事前検証ツール
+                  Version {pkg.version} — FANUC 3軸マシニングセンタ向け NCビューア &amp; 事前検証ツール
                 </div>
               </div>
             </div>

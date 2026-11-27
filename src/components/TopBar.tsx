@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
+  ArrowDownToLine,
   Check,
   ChevronDown,
   ChevronRight,
@@ -85,6 +86,9 @@ interface TopBarProps {
   onClearBreakpoints: () => void;
   onOpenBottomTab: (tab: "cycle" | "problems" | "modal" | "macros") => void;
   // ヘルプ系
+  availableUpdateVersion?: string | null;
+  onCheckForUpdates: () => void;
+  onOpenUpdateModal: () => void;
   onOpenHelpModal: (mode: "shortcuts" | "about") => void;
 }
 
@@ -141,6 +145,9 @@ export const TopBar: React.FC<TopBarProps> = ({
   onStepSim,
   onClearBreakpoints,
   onOpenBottomTab,
+  availableUpdateVersion,
+  onCheckForUpdates,
+  onOpenUpdateModal,
   onOpenHelpModal,
 }) => {
   const [openMenu, setOpenMenu] = useState<TopMenuKey | null>(null);
@@ -654,6 +661,14 @@ export const TopBar: React.FC<TopBarProps> = ({
                     />
                     <MenuDivider />
                     <MenuItem
+                      label={
+                        availableUpdateVersion
+                          ? `アップデートを確認... (v${availableUpdateVersion} あり)`
+                          : "アップデートを確認..."
+                      }
+                      onClick={onCheckForUpdates}
+                    />
+                    <MenuItem
                       label="TomboGCoder について"
                       onClick={() => onOpenHelpModal("about")}
                     />
@@ -701,9 +716,19 @@ export const TopBar: React.FC<TopBarProps> = ({
         )}
       </div>
 
-      {/* 右：外部監視・マシン切替トグル・レイアウト3連・Windowsウィンドウ操作 */}
+      {/* 右：アップデート通知・外部監視・マシン切替トグル・レイアウト3連・Windowsウィンドウ操作 */}
       <div className="flex items-center h-full shrink-0 text-[11px]">
         <div className="flex items-center gap-1.5 pr-2">
+          {availableUpdateVersion && (
+            <button
+              onClick={onOpenUpdateModal}
+              className="px-2 py-0.5 rounded border border-[#38bdf8]/60 bg-[#0c4a6e]/65 hover:bg-[#0369a1]/80 text-[#e0f2fe] flex items-center gap-1 font-medium transition-colors"
+              title={`新しいバージョン v${availableUpdateVersion} が利用可能です（クリックして更新）`}
+            >
+              <ArrowDownToLine className="w-3 h-3 text-[#38bdf8]" />
+              <span>v{availableUpdateVersion} 更新</span>
+            </button>
+          )}
           <button
             onClick={onToggleWatchExternal}
             disabled={!filePath}

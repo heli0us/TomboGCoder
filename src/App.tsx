@@ -13,7 +13,14 @@ import {
   UnsavedChangesModal,
 } from "./components/FileActionModals";
 import { HelpModal } from "./components/HelpModals";
+import { UpdateModal, type UpdateModalState } from "./components/UpdateModal";
 import { WelcomeScreen } from "./components/WelcomeScreen";
+import {
+  checkForAppUpdate,
+  installAppUpdate,
+  type AppUpdateInfo,
+  type UpdateDownloadProgress,
+} from "./services/updater";
 import {
   exportJsonFile,
   exportReportFile,
@@ -413,6 +420,11 @@ export function App() {
     [],
   );
   const [helpModal, setHelpModal] = useState<null | "shortcuts" | "about">(null);
+  const [updateModalOpen, setUpdateModalOpen] = useState(false);
+  const [updateState, setUpdateState] = useState<UpdateModalState>("idle");
+  const [availableUpdate, setAvailableUpdate] = useState<AppUpdateInfo | null>(null);
+  const [updateProgress, setUpdateProgress] = useState<UpdateDownloadProgress | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
   const [hasDocument, setHasDocument] = useState<boolean>(false);
   const [source, setSource] = useState<string>("");
   const [filePath, setFilePath] = useState<string | null>(null);
@@ -1543,6 +1555,67 @@ export function App() {
     }
   }, [showToast]);
 
+  const handleCheckForUpdates = useCallback(
+    async (silent: boolean) => {
+      if (!isTauriRuntime()) {
+        if (!silent) {
+          showToast("自動アップデートはデスクトップアプリ版で利用できます");
+        }
+        return;
+      }
+      if (!silent) {
+        setUpdateError(null);
+        setUpdateProgress(null);
+        setUpdateState("checking");
+        setUpdateModalOpen(true);
+      }
+      try {
+        const info = await checkForAppUpdate();
+        if (info) {
+          setAvailableUpdate(info);
+          setUpdateState("available");
+          if (silent) {
+            showToast(`新しいバージョン v${info.version} が利用可能です（右上の更新ボタンから適用）`);
+          }
+        } else if (!silent) {
+          setAvailableUpdate(null);
+          setUpdateState("up-to-date");
+        }
+      } catch (err) {
+        if (!silent) {
+          setUpdateError(String(err));
+          setUpdateState("error");
+        }
+      }
+    },
+    [showToast],
+  );
+
+  const handleInstallUpdate = useCallback(async () => {
+    if (!availableUpdate) return;
+    setUpdateError(null);
+    setUpdateState("downloading");
+    setUpdateProgress({ downloadedBytes: 0, totalBytes: null, percent: 0 });
+    try {
+      await installAppUpdate(availableUpdate.raw, (prog) => {
+        setUpdateProgress(prog);
+      });
+    } catch (err) {
+      setUpdateError(String(err));
+      setUpdateState("error");
+    }
+  }, [availableUpdate]);
+
+  // デスクトップ起動3.5秒後にバックグラウンドで新バージョンを自動チェック（失敗時は静かに無視）
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    const timer = window.setTimeout(() => {
+      void handleCheckForUpdates(true);
+    }, 3500);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleExportCsv = useCallback(async () => {
     if (!effectiveResult || !isTauriRuntime()) return;
     try {
@@ -1816,6 +1889,18 @@ export function App() {
         onOpenBottomTab={(tab) => {
           setBottomTab(tab);
           setBottomCollapsed(false);
+        }}
+        availableUpdateVersion={availableUpdate?.version ?? null}
+        onCheckForUpdates={() => {
+          void handleCheckForUpdates(false);
+        }}
+        onOpenUpdateModal={() => {
+          if (availableUpdate) {
+            setUpdateState("available");
+            setUpdateModalOpen(true);
+          } else {
+            void handleCheckForUpdates(false);
+          }
         }}
         onOpenHelpModal={(mode) => setHelpModal(mode)}
       />
@@ -2153,6 +2238,20 @@ export function App() {
       {helpModal && (
         <HelpModal mode={helpModal} isMac={isMac} onClose={() => setHelpModal(null)} />
       )}
+      <UpdateModal
+        open={updateModalOpen}
+        state={updateState}
+        updateInfo={availableUpdate}
+        progress={updateProgress}
+        errorMessage={updateError}
+        onCheckAgain={() => {
+          void handleCheckForUpdates(false);
+        }}
+        onStartInstall={() => {
+          void handleInstallUpdate();
+        }}
+        onClose={() => setUpdateModalOpen(false)}
+      />
     </div>
   );
 }
