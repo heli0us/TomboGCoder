@@ -337,8 +337,8 @@ pub fn expand_program(
             }
 
             // 4. GOTO n
-            if upper.starts_with("GOTO") {
-                let target_str = upper[4..].trim();
+            if let Some(rest) = upper.strip_prefix("GOTO") {
+                let target_str = rest.trim();
                 match eval_expression(target_str, &vars) {
                     Ok(v) => {
                         let n_target = v.round().max(0.0) as u32;

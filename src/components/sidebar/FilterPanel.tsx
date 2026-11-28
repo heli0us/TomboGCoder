@@ -63,6 +63,7 @@ const TOGGLE_ITEMS: ReadonlyArray<{
     | "showCompensatedPath"
     | "showProgramPath"
     | "showToolWidthFill"
+    | "snapToolOutline"
     | "showRapid"
     | "showToolModel"
     | "showGrid"
@@ -77,6 +78,12 @@ const TOGGLE_ITEMS: ReadonlyArray<{
   { key: "showCompensatedPath", label: "補正後パス", title: "実工具中心パスを表示" },
   { key: "showProgramPath", label: "補正前比較", title: "G41/G42 補正前パスを重ね表示", accent: "#e879f9" },
   { key: "showToolWidthFill", label: "工具径輪郭", title: "T工具径の外周アウトライン（切削幅輪郭線）を表示" },
+  {
+    key: "snapToolOutline",
+    label: "外径スナップ",
+    title: "工具径輪郭ON時、工具外周ラインへのホバー・計測スナップを有効化",
+    accent: "#a78bfa",
+  },
   { key: "showRapid", label: "早送り G00", title: "早送りパス (G00) を表示", accent: "#f87171" },
   { key: "showToolModel", label: "3D工具", title: "現在位置に3D工具モデルを表示" },
   { key: "showGrid", label: "グリッド", title: "XY基準グリッドを表示" },

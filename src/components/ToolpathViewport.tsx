@@ -15,12 +15,16 @@ import {
   getToolColor,
 } from "../types/nc";
 import {
+  type OutlineRole,
   type SnapPoint,
+  buildOriginUcsGizmo,
   buildToolWidthFillMesh,
   disposeGroupChildren,
   extractSnapPoints,
   getMotionColor,
+  getSegmentOutlinePolylines,
   getSegmentSnapPoints,
+  getSegmentTypedOutlines,
   projectToSegment2D,
   rebuildToolMeshes,
   samplePolylineAt,
@@ -35,6 +39,19 @@ import {
   ViewportOverlays,
   type ZoomBox,
 } from "./viewport/ViewportOverlays";
+import {
+  ALL_PANE_IDS,
+  type PaneViewAngle,
+  type SavedPaneCameraMap,
+  type ViewPaneId,
+  cameraPresetToPaneAngle,
+  computeFitCameraMetrics,
+  computeLayoutPaneRects,
+  defaultSavedPaneCameras,
+  getPresetDirection,
+  loadSavedPaneCameras,
+  savePaneCamerasToStorage,
+} from "../utils/viewportCameras";
 import { TraceBar } from "./viewport/TraceBar";
 
 interface ToolpathViewportProps {
@@ -59,7 +76,7 @@ interface ToolpathViewportProps {
   onBreakHit: (idx: number, reason: string) => void;
   isViewportMaximized: boolean;
   onToggleMaximizeViewport: () => void;
-  cameraCommand: { preset: CameraPreset | "fit"; seq: number } | null;
+  cameraCommand: { preset: CameraPreset | "fit" | "fitAll"; seq: number } | null;
 }
 
 interface PathBufferHandles {
@@ -72,6 +89,13 @@ interface PathBufferHandles {
   rapidVertsBefore: Int32Array;
   rapidVertsAfter: Int32Array;
 }
+
+interface PaneCameraSystem {
+  camera: THREE.PerspectiveCamera;
+  controls: OrbitControls;
+}
+
+const PANE_FOV_DEG = 38;
 
 export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
   programSegments,
@@ -97,14 +121,23 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
   onToggleMaximizeViewport,
   cameraCommand,
 }) => {
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const mountRef = useRef<HTMLDivElement | null>(null);
-  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
-  const orthoCamsRef = useRef<{
-    top: THREE.OrthographicCamera;
-    front: THREE.OrthographicCamera;
-    right: THREE.OrthographicCamera;
-  } | null>(null);
-  const controlsRef = useRef<OrbitControls | null>(null);
+  const paneDivRefs = useRef<Record<ViewPaneId, HTMLDivElement | null>>({
+    main: null,
+    sub1: null,
+    sub2: null,
+    sub3: null,
+  });
+  const paneSystemsRef = useRef<Record<ViewPaneId, PaneCameraSystem> | null>(null);
+  const savedCamerasRef = useRef<SavedPaneCameraMap>(loadSavedPaneCameras());
+  const [paneAngles, setPaneAngles] = useState<Record<ViewPaneId, PaneViewAngle>>(() => ({
+    main: savedCamerasRef.current.main.angle,
+    sub1: savedCamerasRef.current.sub1.angle,
+    sub2: savedCamerasRef.current.sub2.angle,
+    sub3: savedCamerasRef.current.sub3.angle,
+  }));
+  const activePaneRef = useRef<ViewPaneId>("main");
 
   const pathGroupRef = useRef<THREE.Group | null>(null);
   const activeTipLineRef = useRef<THREE.Line | null>(null);
@@ -149,7 +182,12 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
   const [snapHover, setSnapHover] = useState<ActiveSnapHover | null>(null);
 
   const hasAutoFittedRef = useRef(false);
-  const lastMiddleClickRef = useRef<number>(0);
+  const lastMiddleClickRef = useRef<Record<ViewPaneId, number>>({
+    main: 0,
+    sub1: 0,
+    sub2: 0,
+    sub3: 0,
+  });
   const pointerDownPosRef = useRef<{ x: number; y: number } | null>(null);
 
   // 60fps ループ参照用 Refs
@@ -159,6 +197,10 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
   traceClipRef.current = displayOptions.traceClipFuture;
   const showToolModelRef = useRef(displayOptions.showToolModel);
   showToolModelRef.current = displayOptions.showToolModel;
+  const showToolWidthRef = useRef(displayOptions.showToolWidthFill);
+  showToolWidthRef.current = displayOptions.showToolWidthFill;
+  const snapToolOutlineRef = useRef(displayOptions.snapToolOutline);
+  snapToolOutlineRef.current = displayOptions.snapToolOutline;
   const navModeRef = useRef<NavMode>(navMode);
   navModeRef.current = navMode;
   const bboxRef = useRef(boundingBox);
@@ -373,81 +415,134 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPlaying]);
 
-  const applyCameraPreset = (preset: CameraPreset | "fit") => {
-    const camera = cameraRef.current;
-    const controls = controlsRef.current;
-    const container = mountRef.current;
-    if (!camera || !controls) return;
+  /** ペインの現在ピクセルサイズを取得（非表示ペインでも想定アスペクトを返す） */
+  const getPaneDimensions = (paneId: ViewPaneId): { w: number; h: number } => {
+    const container = containerRef.current;
+    const totalW = Math.max(1, container?.clientWidth ?? 800);
+    const totalH = Math.max(1, container?.clientHeight ?? 600);
+    const rects = computeLayoutPaneRects(viewLayoutRef.current, totalW, totalH);
+    const found = rects.find((r) => r.id === paneId);
+    if (found) return { w: found.w, h: found.h };
+    if (paneId === "main") return { w: totalW, h: Math.max(1, Math.floor(totalH * 0.66)) };
+    return { w: Math.max(1, Math.floor(totalW * 0.5)), h: Math.max(1, Math.floor(totalH * 0.34)) };
+  };
 
-    const bb = bboxRef.current;
-    const min = bb.valid ? bb.min : { x: -50, y: -50, z: -20 };
-    const max = bb.valid ? bb.max : { x: 100, y: 100, z: 50 };
-    const cx = (min.x + max.x) * 0.5;
-    const cy = (min.y + max.y) * 0.5;
-    const cz = (min.z + max.z) * 0.5;
+  /** 指定ペインを指定方向ベクトルでワーク全体へフィット */
+  const applyPaneDirectionFit = (
+    paneId: ViewPaneId,
+    dirVec: THREE.Vector3,
+    angleLabel: PaneViewAngle,
+    persist: boolean,
+  ) => {
+    const systems = paneSystemsRef.current;
+    if (!systems) return;
+    const { camera, controls } = systems[paneId];
+    const { w, h } = getPaneDimensions(paneId);
+    const margin = paneId === "main" ? 1.25 : 1.18;
+    const { center, dist } = computeFitCameraMetrics(bboxRef.current, camera.fov, w, h, margin);
 
-    const sizeX = Math.max(max.x - min.x, 10);
-    const sizeY = Math.max(max.y - min.y, 10);
-    const sizeZ = Math.max(max.z - min.z, 10);
-
-    // ウィンドウ縦横比と視野角 (FOV) を考慮して、バウンディングスフィア全体が必ず収まる距離を算出
-    const aspect = container
-      ? container.clientWidth / Math.max(1, container.clientHeight)
-      : camera.aspect || 1.3;
-    camera.aspect = aspect;
-    const vFovRad = (camera.fov * Math.PI) / 180;
-    const hFovRad = 2 * Math.atan(Math.tan(vFovRad * 0.5) * aspect);
-    const halfMinFov = Math.min(vFovRad, hFovRad) * 0.5;
-
-    const radius = Math.max(Math.hypot(sizeX, sizeY, sizeZ) * 0.5, 25);
-    // 上部HUD・下部トレースバー分の余白も含めて 1.25倍の余裕を確保
-    const dist = (radius / Math.max(0.15, Math.sin(halfMinFov))) * 1.25;
-
-    // fit 用に、target を書き換える前の現在の視線方向ベクトルを保存
-    const prevDir = camera.position.clone().sub(controls.target);
-
-    controls.target.set(cx, cy, cz);
-    if (preset === "top") {
-      camera.position.set(cx, cy - 0.001, cz + dist);
-    } else if (preset === "front") {
-      camera.position.set(cx, cy - dist, cz);
-    } else if (preset === "right") {
-      camera.position.set(cx + dist, cy, cz);
-    } else if (preset === "fit") {
-      if (prevDir.lengthSq() < 1e-4) {
-        // 原点側（左手前）からワーク全体を見渡すデフォルト ISO 角度
-        const isoDir = new THREE.Vector3(-0.68, -0.78, 0.68).normalize();
-        camera.position.set(cx + isoDir.x * dist, cy + isoDir.y * dist, cz + isoDir.z * dist);
-      } else {
-        prevDir.normalize().multiplyScalar(dist);
-        camera.position.set(cx + prevDir.x, cy + prevDir.y, cz + prevDir.z);
-      }
+    const dir = dirVec.clone();
+    if (dir.lengthSq() < 1e-6) {
+      dir.copy(getPresetDirection("iso"));
     } else {
-      // 原点側（左手前 -X, -Y, +Z）からワークを見渡す ISO 角度
-      const isoDir = new THREE.Vector3(-0.68, -0.78, 0.68).normalize();
-      camera.position.set(cx + isoDir.x * dist, cy + isoDir.y * dist, cz + isoDir.z * dist);
+      dir.normalize();
     }
 
+    controls.target.copy(center);
+    camera.position.copy(center).addScaledVector(dir, dist);
     camera.near = Math.max(0.1, dist * 0.001);
     camera.far = Math.max(10000, dist * 25);
+    camera.aspect = w / Math.max(1, h);
     camera.updateProjectionMatrix();
     controls.update();
+
+    savedCamerasRef.current[paneId] = {
+      angle: angleLabel,
+      dir: [dir.x, dir.y, dir.z],
+    };
+    setPaneAngles((prev) => (prev[paneId] === angleLabel ? prev : { ...prev, [paneId]: angleLabel }));
+    if (persist) {
+      savePaneCamerasToStorage(savedCamerasRef.current);
+    }
+  };
+
+  /** ペイン個別に角度プリセットまたは全体フィットを適用 */
+  const applyPaneAngle = (paneId: ViewPaneId, action: Exclude<PaneViewAngle, "custom"> | "fit") => {
+    const systems = paneSystemsRef.current;
+    if (!systems) return;
+    if (action === "fit") {
+      const { camera, controls } = systems[paneId];
+      const prevDir = camera.position.clone().sub(controls.target);
+      const saved = savedCamerasRef.current[paneId];
+      const useDir =
+        prevDir.lengthSq() > 1e-6
+          ? prevDir.normalize()
+          : new THREE.Vector3(saved.dir[0], saved.dir[1], saved.dir[2]);
+      applyPaneDirectionFit(paneId, useDir, saved.angle, true);
+      return;
+    }
+    applyPaneDirectionFit(paneId, getPresetDirection(action), action, true);
+  };
+
+  /** 全ペインの角度・位置をデフォルト (ISO / XY / XZ / YZ) へリセット */
+  const resetAllViewsToDefault = () => {
+    const defaults = defaultSavedPaneCameras();
+    for (const paneId of ALL_PANE_IDS) {
+      const def = defaults[paneId];
+      const dir = new THREE.Vector3(def.dir[0], def.dir[1], def.dir[2]);
+      applyPaneDirectionFit(paneId, dir, def.angle, false);
+    }
+    savePaneCamerasToStorage(savedCamerasRef.current);
+  };
+
+  /** ツールバー・ショートカットからの視点コマンドを現在アクティブなペインへ適用 */
+  const applyCameraPreset = (preset: CameraPreset | "fit" | "fitAll") => {
+    if (preset === "fitAll") {
+      // 全4ペインをそれぞれ記憶済みの角度（グリグリ自由角度含む）のまま全体フィット
+      for (const paneId of ALL_PANE_IDS) {
+        const saved = savedCamerasRef.current[paneId];
+        const dir = new THREE.Vector3(saved.dir[0], saved.dir[1], saved.dir[2]);
+        applyPaneDirectionFit(paneId, dir, saved.angle, false);
+      }
+      return;
+    }
+    const layout = viewLayoutRef.current;
+    const visibleIds: ViewPaneId[] =
+      layout === "single"
+        ? ["main"]
+        : layout === "triple"
+          ? ["sub1", "sub2", "main"]
+          : ["sub1", "sub2", "sub3", "main"];
+    const targetPane = visibleIds.includes(activePaneRef.current) ? activePaneRef.current : "main";
+    if (preset === "fit") {
+      applyPaneAngle(targetPane, "fit");
+    } else {
+      applyPaneAngle(targetPane, cameraPresetToPaneAngle(preset));
+    }
   };
 
   const applyWindowZoom = (box: ZoomBox) => {
-    const container = mountRef.current;
-    const camera = cameraRef.current;
-    const controls = controlsRef.current;
-    if (!container || !camera || !controls) return;
+    const container = containerRef.current;
+    const systems = paneSystemsRef.current;
+    if (!container || !systems) return;
 
-    const w = container.clientWidth;
-    const h = Math.max(1, container.clientHeight);
+    const rects = computeLayoutPaneRects(
+      viewLayoutRef.current,
+      container.clientWidth,
+      Math.max(1, container.clientHeight),
+    );
+    const paneRect = rects.find((r) => r.id === box.paneId) ?? rects[0];
+    if (!paneRect) return;
+
+    const { camera, controls } = systems[paneRect.id];
     const bw = Math.abs(box.x1 - box.x0);
     const bh = Math.abs(box.y1 - box.y0);
     if (bw < 12 || bh < 12) return;
 
-    const ndcX = (((box.x0 + box.x1) * 0.5) / w) * 2 - 1;
-    const ndcY = -(((box.y0 + box.y1) * 0.5) / h) * 2 + 1;
+    const localCx = (box.x0 + box.x1) * 0.5 - paneRect.x;
+    const localCy = (box.y0 + box.y1) * 0.5 - paneRect.y;
+    const ndcX = (localCx / Math.max(1, paneRect.w)) * 2 - 1;
+    const ndcY = -(localCy / Math.max(1, paneRect.h)) * 2 + 1;
 
     const camDir = new THREE.Vector3();
     camera.getWorldDirection(camDir);
@@ -458,7 +553,7 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     const newTarget = new THREE.Vector3();
     if (!raycaster.ray.intersectPlane(targetPlane, newTarget)) return;
 
-    const scale = Math.max(bw / w, bh / h, 0.08);
+    const scale = Math.max(bw / Math.max(1, paneRect.w), bh / Math.max(1, paneRect.h), 0.08);
     const offset = camera.position.clone().sub(controls.target).multiplyScalar(scale);
     controls.target.copy(newTarget);
     camera.position.copy(newTarget).add(offset);
@@ -467,7 +562,6 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
       const target = e.target as HTMLElement | null;
       if (
         target &&
@@ -477,6 +571,24 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
       ) {
         return;
       }
+
+      if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === "m") {
+        e.preventDefault();
+        setMeasureMode((prev) => {
+          if (prev) {
+            setMeasurePoints([]);
+            setMeasureAnchor(null);
+            setSnapHover(null);
+            setMeasureHoverSeg(null);
+          } else {
+            setZoomBox(null);
+          }
+          return !prev;
+        });
+        return;
+      }
+
+      if (e.key !== "Escape") return;
       if (measureMode) {
         setMeasurePoints([]);
         setMeasureAnchor(null);
@@ -496,36 +608,22 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
   }, [measureMode]);
 
   useEffect(() => {
-    const controls = controlsRef.current;
-    if (!controls) return;
-    controls.mouseButtons.LEFT =
+    const systems = paneSystemsRef.current;
+    if (!systems) return;
+    const leftAction =
       navMode === "windowZoom" ? null : navMode === "orbit" ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
+    for (const id of ALL_PANE_IDS) {
+      systems[id].controls.mouseButtons.LEFT = leftAction;
+    }
   }, [navMode]);
 
-  // 1. Three.js 初期化 & 60fps シミュレーションループ
+  // 1. Three.js 初期化 & 4ペイン独立カメラ・OrbitControls & 60fps シミュレーションループ
   useEffect(() => {
-    const container = mountRef.current;
-    if (!container) return;
+    const container = containerRef.current;
+    const mountEl = mountRef.current;
+    if (!container || !mountEl) return;
 
     const scene = new THREE.Scene();
-
-    const camera = new THREE.PerspectiveCamera(
-      40,
-      container.clientWidth / Math.max(1, container.clientHeight),
-      0.1,
-      10000,
-    );
-    camera.up.set(0, 0, 1);
-    camera.position.set(-160, -170, 150);
-    cameraRef.current = camera;
-
-    const topCam = new THREE.OrthographicCamera(-100, 100, 100, -100, 0.1, 10000);
-    topCam.up.set(0, 1, 0);
-    const frontCam = new THREE.OrthographicCamera(-100, 100, 100, -100, 0.1, 10000);
-    frontCam.up.set(0, 0, 1);
-    const rightCam = new THREE.OrthographicCamera(-100, 100, 100, -100, 0.1, 10000);
-    rightCam.up.set(0, 0, 1);
-    orthoCamsRef.current = { top: topCam, front: frontCam, right: rightCam };
 
     const renderer = new THREE.WebGLRenderer({
       antialias: true,
@@ -534,41 +632,109 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     });
     renderer.setClearColor(0x000000, 0);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.setSize(container.clientWidth, container.clientHeight);
-    container.appendChild(renderer.domElement);
+    renderer.setSize(container.clientWidth, Math.max(1, container.clientHeight));
+    mountEl.appendChild(renderer.domElement);
 
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.1;
-    controls.screenSpacePanning = true;
-    controls.zoomToCursor = true;
-    controls.zoomSpeed = 1.15;
-    controls.panSpeed = 1.0;
-    controls.rotateSpeed = 0.85;
-    controls.mouseButtons = {
-      LEFT: THREE.MOUSE.PAN,
-      MIDDLE: THREE.MOUSE.PAN,
-      RIGHT: THREE.MOUSE.ROTATE,
-    };
-    controls.target.set(50, 40, 0);
-    controls.update();
-    controlsRef.current = controls;
+    const systems = {} as Record<ViewPaneId, PaneCameraSystem>;
+    const cleanups: Array<() => void> = [];
 
-    const onCanvasMouseDownCapture = (ev: MouseEvent) => {
-      if (ev.button === 1) {
-        ev.preventDefault();
-        const now = performance.now();
-        if (now - lastMiddleClickRef.current < 340) {
-          lastMiddleClickRef.current = 0;
-          applyCameraPreset("fit");
-        } else {
-          lastMiddleClickRef.current = now;
+    for (const paneId of ALL_PANE_IDS) {
+      const paneEl = paneDivRefs.current[paneId] ?? container;
+      const saved = savedCamerasRef.current[paneId];
+      const initDir = new THREE.Vector3(saved.dir[0], saved.dir[1], saved.dir[2]).normalize();
+
+      const cam = new THREE.PerspectiveCamera(
+        PANE_FOV_DEG,
+        Math.max(1, container.clientWidth) / Math.max(1, container.clientHeight),
+        0.1,
+        10000,
+      );
+      cam.up.set(0, 0, 1);
+      cam.position.set(50 + initDir.x * 260, 40 + initDir.y * 260, initDir.z * 260);
+
+      const ctrl = new OrbitControls(cam, paneEl);
+      ctrl.enableDamping = true;
+      ctrl.dampingFactor = 0.1;
+      ctrl.screenSpacePanning = true;
+      ctrl.zoomToCursor = true;
+      ctrl.zoomSpeed = 1.15;
+      ctrl.panSpeed = 1.0;
+      ctrl.rotateSpeed = 0.85;
+      ctrl.mouseButtons = {
+        LEFT:
+          navModeRef.current === "windowZoom"
+            ? null
+            : navModeRef.current === "orbit"
+              ? THREE.MOUSE.ROTATE
+              : THREE.MOUSE.PAN,
+        MIDDLE: THREE.MOUSE.PAN,
+        RIGHT: THREE.MOUSE.ROTATE,
+      };
+      ctrl.target.set(50, 40, 0);
+      ctrl.update();
+
+      // グリグリ回転・操作終了時に現在のカメラ角度を自動記憶（慣性停止後の最終角度も保存）
+      let saveTimer: number | null = null;
+      const persistCurrentAngle = () => {
+        const diff = cam.position.clone().sub(ctrl.target);
+        if (diff.lengthSq() < 1e-6) return;
+        diff.normalize();
+
+        const prevSaved = savedCamerasRef.current[paneId];
+        let nextAngle: PaneViewAngle = prevSaved.angle;
+        if (prevSaved.angle !== "custom") {
+          const presetDir = getPresetDirection(prevSaved.angle);
+          // プリセット方向から約2.5°以上回転されていたら自由視点へ切替
+          if (diff.dot(presetDir) < 0.999) {
+            nextAngle = "custom";
+          }
         }
-      }
-    };
-    const onContextMenu = (ev: MouseEvent) => ev.preventDefault();
-    renderer.domElement.addEventListener("mousedown", onCanvasMouseDownCapture, { capture: true });
-    renderer.domElement.addEventListener("contextmenu", onContextMenu);
+        savedCamerasRef.current[paneId] = {
+          angle: nextAngle,
+          dir: [diff.x, diff.y, diff.z],
+        };
+        savePaneCamerasToStorage(savedCamerasRef.current);
+        setPaneAngles((prev) =>
+          prev[paneId] === nextAngle ? prev : { ...prev, [paneId]: nextAngle },
+        );
+      };
+      const onControlEnd = () => {
+        persistCurrentAngle();
+        if (saveTimer !== null) window.clearTimeout(saveTimer);
+        saveTimer = window.setTimeout(() => {
+          saveTimer = null;
+          persistCurrentAngle();
+        }, 320);
+      };
+      ctrl.addEventListener("end", onControlEnd);
+
+      const onPaneMouseDownCapture = (ev: MouseEvent) => {
+        activePaneRef.current = paneId;
+        if (ev.button === 1) {
+          ev.preventDefault();
+          const now = performance.now();
+          if (now - lastMiddleClickRef.current[paneId] < 340) {
+            lastMiddleClickRef.current[paneId] = 0;
+            applyPaneAngle(paneId, "fit");
+          } else {
+            lastMiddleClickRef.current[paneId] = now;
+          }
+        }
+      };
+      const onContextMenu = (ev: MouseEvent) => ev.preventDefault();
+      paneEl.addEventListener("mousedown", onPaneMouseDownCapture, { capture: true });
+      paneEl.addEventListener("contextmenu", onContextMenu);
+
+      systems[paneId] = { camera: cam, controls: ctrl };
+      cleanups.push(() => {
+        if (saveTimer !== null) window.clearTimeout(saveTimer);
+        ctrl.removeEventListener("end", onControlEnd);
+        paneEl.removeEventListener("mousedown", onPaneMouseDownCapture, { capture: true });
+        paneEl.removeEventListener("contextmenu", onContextMenu);
+        ctrl.dispose();
+      });
+    }
+    paneSystemsRef.current = systems;
 
     const ambient = new THREE.AmbientLight(0xffffff, 0.78);
     const dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
@@ -711,93 +877,27 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
         }
       }
 
-      controls.update();
-
       const w = container.clientWidth;
       const h = Math.max(1, container.clientHeight);
-
       const layout = viewLayoutRef.current;
+      const rects = computeLayoutPaneRects(layout, w, h);
 
-      const renderView = (cam: THREE.Camera, vx: number, vy: number, vw: number, vh: number) => {
-        updateScreenSpaceMarkers(hoverGroup, cam, vh);
-        updateScreenSpaceMarkers(measureGroup, cam, vh);
-        renderer.setViewport(vx, vy, vw, vh);
-        if (layout !== "single") renderer.setScissor(vx, vy, vw, vh);
-        renderer.render(scene, cam);
-      };
+      renderer.setScissorTest(layout !== "single");
 
-      if (layout === "single") {
-        renderer.setScissorTest(false);
-        camera.aspect = w / h;
-        camera.updateProjectionMatrix();
-        renderView(camera, 0, 0, w, h);
-      } else {
-        const bb = bboxRef.current;
-        const min = bb.valid ? bb.min : { x: -50, y: -50, z: -20 };
-        const max = bb.valid ? bb.max : { x: 100, y: 100, z: 50 };
-        const cx = (min.x + max.x) * 0.5;
-        const cy = (min.y + max.y) * 0.5;
-        const cz = (min.z + max.z) * 0.5;
-        const halfH = Math.max(max.x - min.x, max.y - min.y, max.z - min.z, 60) * 0.68;
-        const dist = Math.max(halfH * 6, 400);
+      for (const rect of rects) {
+        const sys = systems[rect.id];
+        sys.controls.update();
+        sys.camera.aspect = rect.w / Math.max(1, rect.h);
+        sys.camera.updateProjectionMatrix();
 
-        const updateOrtho = (
-          cam: THREE.OrthographicCamera,
-          pos: [number, number, number],
-          vw: number,
-          vh: number,
-        ) => {
-          const aspect = vw / Math.max(1, vh);
-          const halfW = halfH * aspect;
-          cam.left = -halfW;
-          cam.right = halfW;
-          cam.top = halfH;
-          cam.bottom = -halfH;
-          cam.near = 0.1;
-          cam.far = dist * 4;
-          cam.position.set(pos[0], pos[1], pos[2]);
-          cam.lookAt(cx, cy, cz);
-          cam.updateProjectionMatrix();
-        };
-
-        renderer.setScissorTest(true);
-
-        if (layout === "triple") {
-          // 3画面分割：上段(34%)に XY上面・XZ正面、下段(66%)に大きなメイン3D
-          const topH = Math.floor(h * 0.34);
-          const mainH = Math.max(1, h - topH);
-          const hw = Math.floor(w / 2);
-
-          updateOrtho(topCam, [cx, cy, cz + dist], hw, topH);
-          renderView(topCam, 0, mainH, hw, topH);
-
-          updateOrtho(frontCam, [cx, cy - dist, cz], w - hw, topH);
-          renderView(frontCam, hw, mainH, w - hw, topH);
-
-          camera.aspect = w / mainH;
-          camera.updateProjectionMatrix();
-          renderView(camera, 0, 0, w, mainH);
-        } else {
-          // 4面図：上段(32%)に XY上面・XZ正面・YZ側面、下段(68%)に大きなメイン3D
-          const topH = Math.floor(h * 0.32);
-          const mainH = Math.max(1, h - topH);
-          const w1 = Math.floor(w / 3);
-          const w2 = Math.floor((w * 2) / 3) - w1;
-          const w3 = w - w1 - w2;
-
-          updateOrtho(topCam, [cx, cy, cz + dist], w1, topH);
-          renderView(topCam, 0, mainH, w1, topH);
-
-          updateOrtho(frontCam, [cx, cy - dist, cz], w2, topH);
-          renderView(frontCam, w1, mainH, w2, topH);
-
-          updateOrtho(rightCam, [cx + dist, cy, cz], w3, topH);
-          renderView(rightCam, w1 + w2, mainH, w3, topH);
-
-          camera.aspect = w / mainH;
-          camera.updateProjectionMatrix();
-          renderView(camera, 0, 0, w, mainH);
+        updateScreenSpaceMarkers(helperGroup, sys.camera, rect.h);
+        updateScreenSpaceMarkers(hoverGroup, sys.camera, rect.h);
+        updateScreenSpaceMarkers(measureGroup, sys.camera, rect.h);
+        renderer.setViewport(rect.glX, rect.glY, rect.w, rect.h);
+        if (layout !== "single") {
+          renderer.setScissor(rect.glX, rect.glY, rect.w, rect.h);
         }
+        renderer.render(scene, sys.camera);
       }
     };
     rafId = requestAnimationFrame(animate);
@@ -807,8 +907,6 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
       const w = container.clientWidth;
       const h = Math.max(1, container.clientHeight);
       setViewportSize({ width: w, height: h });
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
       renderer.setSize(w, h);
     });
     ro.observe(container);
@@ -816,16 +914,13 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     return () => {
       cancelAnimationFrame(rafId);
       ro.disconnect();
-      renderer.domElement.removeEventListener("mousedown", onCanvasMouseDownCapture, {
-        capture: true,
-      });
-      renderer.domElement.removeEventListener("contextmenu", onContextMenu);
+      for (const fn of cleanups) fn();
+      paneSystemsRef.current = null;
       tipGeo.dispose();
       tipMat.dispose();
-      controls.dispose();
       renderer.dispose();
-      if (renderer.domElement.parentNode === container) {
-        container.removeChild(renderer.domElement);
+      if (renderer.domElement.parentNode === mountEl) {
+        mountEl.removeChild(renderer.domElement);
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -860,7 +955,7 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
       helperGroup.add(grid);
     }
 
-    helperGroup.add(new THREE.AxesHelper(Math.max(30, span * 0.25)));
+    helperGroup.add(buildOriginUcsGizmo(48));
 
     if (displayOptions.showBoundingBox && boundingBox.valid) {
       const box3 = new THREE.Box3(
@@ -872,7 +967,12 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
 
     if (boundingBox.valid && !hasAutoFittedRef.current) {
       hasAutoFittedRef.current = true;
-      applyCameraPreset("iso");
+      // 記憶されている各ペインの角度（グリグリした角度含む）を保ったまま初回フィット
+      for (const paneId of ALL_PANE_IDS) {
+        const saved = savedCamerasRef.current[paneId];
+        const dir = new THREE.Vector3(saved.dir[0], saved.dir[1], saved.dir[2]);
+        applyPaneDirectionFit(paneId, dir, saved.angle, false);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boundingBox, displayOptions.showGrid, displayOptions.showBoundingBox]);
@@ -1146,6 +1246,58 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     line.renderOrder = 15;
     hg.add(line);
 
+    const isArcWithTool =
+      !measureMode &&
+      displayOptions.showToolWidthFill &&
+      seg.arcRadius !== null &&
+      seg.modalState.toolDiameter > 0;
+    const hitRole = hoverInfo?.hitRole ?? "center";
+
+    if (isArcWithTool) {
+      // 円弧ホバー時はツールチップの色と1対1連動（外径＝シアン、内径＝パープル）でハイライト
+      for (const outline of getSegmentTypedOutlines(seg)) {
+        if (outline.points.length < 2) continue;
+        const isOuter = outline.role === "outer";
+        const isInner = outline.role === "inner";
+        const color = isOuter ? 0x38bdf8 : isInner ? 0xc084fc : 0xffffff;
+        const opacity =
+          hitRole === "outer"
+            ? isOuter
+              ? 1.0
+              : 0.42
+            : hitRole === "inner"
+              ? isInner
+                ? 1.0
+                : 0.42
+              : displayOptions.showToolWidthFill
+                ? 0.96
+                : 0.78;
+        const oPts = outline.points.map((p) => new THREE.Vector3(p.x, p.y, p.z));
+        const oLine = new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints(oPts),
+          new THREE.LineBasicMaterial({
+            color,
+            transparent: true,
+            opacity,
+            depthTest: false,
+          }),
+        );
+        oLine.renderOrder = 16;
+        hg.add(oLine);
+      }
+    } else if (displayOptions.showToolWidthFill) {
+      // 直線・穴・計測モード時：工具径輪郭表示ONなら外周ラインも同色でハイライト
+      const outlineHighlight = buildToolWidthFillMesh([seg], false, {
+        overrideColor: lineColor,
+        opacity: 0.92,
+        depthTest: false,
+      });
+      if (outlineHighlight) {
+        outlineHighlight.renderOrder = 15;
+        hg.add(outlineHighlight);
+      }
+    }
+
     const addRelDot = (pos: Point3, color: number, screenPx: number, order: number) => {
       const mesh = new THREE.Mesh(
         new THREE.SphereGeometry(1, 14, 14),
@@ -1216,7 +1368,7 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
 
       hg.add(crossLines, guideLines);
     }
-  }, [hoverInfo?.segment, measureHoverSeg, measureMode]);
+  }, [hoverInfo?.segment, hoverInfo?.hitRole, measureHoverSeg, measureMode, displayOptions.showToolWidthFill]);
 
   // 5. スナップ計測3Dオーバーレイ（全ボッチを画面ピクセル基準の相対サイズに統一）
   useEffect(() => {
@@ -1281,56 +1433,29 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     }
   }, [measurePoints, snapHover, measureMode]);
 
-  // ピッキングヘルパー
+  // ピッキングヘルパー（現在マウス下のペインID・カメラ・矩形を解決）
   const resolveActiveViewport = (clientX: number, clientY: number) => {
-    const container = mountRef.current;
-    const camera = cameraRef.current;
-    if (!container || !camera) return null;
+    const container = containerRef.current;
+    const systems = paneSystemsRef.current;
+    if (!container || !systems) return null;
 
     const rect = container.getBoundingClientRect();
     const mx = clientX - rect.left;
     const my = clientY - rect.top;
 
-    const layout = viewLayoutRef.current;
-    if (layout === "single") {
-      return { cam: camera as THREE.Camera, vx: 0, vy: 0, vw: rect.width, vh: rect.height, mx, my };
-    }
-    const orthos = orthoCamsRef.current;
-    if (!orthos) return null;
+    const paneRects = computeLayoutPaneRects(viewLayoutRef.current, rect.width, rect.height);
+    const hit =
+      paneRects.find((r) => mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h) ??
+      paneRects[0];
+    if (!hit) return null;
 
-    if (layout === "triple") {
-      const topH = rect.height * 0.34;
-      const hw = rect.width * 0.5;
-      if (my < topH) {
-        if (mx < hw) return { cam: orthos.top as THREE.Camera, vx: 0, vy: 0, vw: hw, vh: topH, mx, my };
-        return { cam: orthos.front as THREE.Camera, vx: hw, vy: 0, vw: rect.width - hw, vh: topH, mx, my };
-      }
-      return {
-        cam: camera as THREE.Camera,
-        vx: 0,
-        vy: topH,
-        vw: rect.width,
-        vh: rect.height - topH,
-        mx,
-        my,
-      };
-    }
-
-    // 4面図（上3面: XY / XZ / YZ、下: メイン3D）
-    const topH = rect.height * 0.32;
-    const w1 = rect.width / 3;
-    const w2 = (rect.width * 2) / 3;
-    if (my < topH) {
-      if (mx < w1) return { cam: orthos.top as THREE.Camera, vx: 0, vy: 0, vw: w1, vh: topH, mx, my };
-      if (mx < w2) return { cam: orthos.front as THREE.Camera, vx: w1, vy: 0, vw: w2 - w1, vh: topH, mx, my };
-      return { cam: orthos.right as THREE.Camera, vx: w2, vy: 0, vw: rect.width - w2, vh: topH, mx, my };
-    }
     return {
-      cam: camera as THREE.Camera,
-      vx: 0,
-      vy: topH,
-      vw: rect.width,
-      vh: rect.height - topH,
+      paneId: hit.id,
+      cam: systems[hit.id].camera as THREE.Camera,
+      vx: hit.x,
+      vy: hit.y,
+      vw: hit.w,
+      vh: hit.h,
       mx,
       my,
     };
@@ -1341,7 +1466,14 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     clientX: number,
     clientY: number,
     maxPx = 12.0,
-  ): { segment: PathSegment; nearestPos: Point3; distPx: number; mx: number; my: number } | null => {
+  ): {
+    segment: PathSegment;
+    nearestPos: Point3;
+    hitRole: "center" | OutlineRole;
+    distPx: number;
+    mx: number;
+    my: number;
+  } | null => {
     const vp = resolveActiveViewport(clientX, clientY);
     if (!vp) return null;
 
@@ -1349,14 +1481,19 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     const v1 = new THREE.Vector3();
     let bestSeg: PathSegment | null = null;
     let bestPos: Point3 | null = null;
+    let bestRole: "center" | OutlineRole = "center";
     let bestDist = maxPx;
 
     const segs = pickableRef.current;
     const stride = segs.length > 25000 ? Math.ceil(segs.length / 25000) : 1;
+    const includeOutline = showToolWidthRef.current && snapToolOutlineRef.current;
 
-    for (let sIdx = 0; sIdx < segs.length; sIdx += stride) {
-      const seg = segs[sIdx];
-      const pts = seg.points;
+    const testPolyline = (
+      seg: PathSegment,
+      pts: Point3[],
+      role: "center" | OutlineRole,
+      distBias = 0,
+    ) => {
       const ptStride = pts.length > 64 ? Math.ceil(pts.length / 64) : 1;
       for (let i = 0; i < pts.length - 1; i += ptStride) {
         const j = Math.min(pts.length - 1, i + ptStride);
@@ -1372,9 +1509,11 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
         const sy1 = vp.vy + (-v1.y * 0.5 + 0.5) * vp.vh;
 
         const { dist, t } = projectToSegment2D(vp.mx, vp.my, sx0, sy0, sx1, sy1);
-        if (dist < bestDist) {
-          bestDist = dist;
+        const score = dist + distBias;
+        if (dist < maxPx && score < bestDist) {
+          bestDist = score;
           bestSeg = seg;
+          bestRole = role;
           bestPos = {
             x: p0.x + (p1.x - p0.x) * t,
             y: p0.y + (p1.y - p0.y) * t,
@@ -1382,9 +1521,27 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
           };
         }
       }
+    };
+
+    for (let sIdx = 0; sIdx < segs.length; sIdx += stride) {
+      const seg = segs[sIdx];
+      testPolyline(seg, seg.points, "center", 0);
+      if (includeOutline) {
+        // 工具径外周ライン上でもホバー・ハイライト・計測スナップに反応（中心軌跡をわずかに優先）
+        for (const outline of getSegmentTypedOutlines(seg)) {
+          testPolyline(seg, outline.points, outline.role, 0.5);
+        }
+      }
     }
     return bestSeg && bestPos
-      ? { segment: bestSeg, nearestPos: bestPos, distPx: bestDist, mx: vp.mx, my: vp.my }
+      ? {
+          segment: bestSeg,
+          nearestPos: bestPos,
+          hitRole: bestRole,
+          distPx: bestDist,
+          mx: vp.mx,
+          my: vp.my,
+        }
       : null;
   };
 
@@ -1399,11 +1556,21 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     const segHit = pickSegmentWithNearestAt(clientX, clientY, 13.0);
     const v = new THREE.Vector3();
 
-    // 1) ホバー中軌道自身の特徴点（端点・円弧実中点・円弧中心）を最優先スナップ
+    // 1) ホバー中軌道自身の特徴点（端点・円弧実中点・円弧中心＋工具径輪郭の端点/中点）を最優先スナップ
     if (segHit) {
       let localBest: SnapPoint | null = null;
       let localDist = 16.0;
-      for (const sp of getSegmentSnapPoints(segHit.segment)) {
+      const candidates: SnapPoint[] = [...getSegmentSnapPoints(segHit.segment)];
+      if (showToolWidthRef.current && snapToolOutlineRef.current) {
+        for (const poly of getSegmentOutlinePolylines(segHit.segment)) {
+          if (poly.length >= 2) {
+            candidates.push({ pos: poly[0], kind: "endpoint" });
+            candidates.push({ pos: poly[poly.length - 1], kind: "endpoint" });
+            candidates.push({ pos: samplePolylineAt(poly, 0.5).pos, kind: "midpoint" });
+          }
+        }
+      }
+      for (const sp of candidates) {
         v.set(sp.pos.x, sp.pos.y, sp.pos.z).project(vp.cam);
         if (v.z > 1) continue;
         const sx = vp.vx + (v.x * 0.5 + 0.5) * vp.vw;
@@ -1455,8 +1622,9 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
   };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (zoomBox) {
-      const rect = e.currentTarget.getBoundingClientRect();
+    const container = containerRef.current;
+    if (zoomBox && container) {
+      const rect = container.getBoundingClientRect();
       setZoomBox((prev) =>
         prev ? { ...prev, x1: e.clientX - rect.left, y1: e.clientY - rect.top } : null,
       );
@@ -1477,7 +1645,12 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     }
     const segHit = pickSegmentWithNearestAt(e.clientX, e.clientY, 11.0);
     if (segHit) {
-      setHoverInfo({ segment: segHit.segment, x: segHit.mx, y: segHit.my });
+      setHoverInfo({
+        segment: segHit.segment,
+        hitRole: segHit.hitRole,
+        x: segHit.mx,
+        y: segHit.my,
+      });
     } else if (hoverInfo) {
       setHoverInfo(null);
     }
@@ -1485,11 +1658,13 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
 
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     pointerDownPosRef.current = { x: e.clientX, y: e.clientY };
-    if (navMode === "windowZoom" && e.button === 0 && !measureMode) {
-      const rect = e.currentTarget.getBoundingClientRect();
+    const container = containerRef.current;
+    if (navMode === "windowZoom" && e.button === 0 && !measureMode && container) {
+      const rect = container.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
-      setZoomBox({ x0: x, y0: y, x1: x, y1: y });
+      const vp = resolveActiveViewport(e.clientX, e.clientY);
+      setZoomBox({ paneId: vp?.paneId ?? "main", x0: x, y0: y, x1: x, y1: y });
     }
   };
 
@@ -1549,8 +1724,37 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
     };
   }, [measurePoints]);
 
+  const paneCursorClass = measureMode
+    ? "cursor-crosshair"
+    : navMode === "windowZoom"
+      ? "cursor-zoom-in"
+      : navMode === "orbit"
+        ? "cursor-move"
+        : "cursor-grab active:cursor-grabbing";
+
+  const getPaneBoxStyle = (paneId: ViewPaneId): React.CSSProperties => {
+    const layout = displayOptions.viewLayout;
+    if (layout === "single") {
+      return paneId === "main"
+        ? { left: 0, top: 0, width: "100%", height: "100%" }
+        : { display: "none" };
+    }
+    if (layout === "triple") {
+      if (paneId === "sub1") return { left: 0, top: 0, width: "50%", height: "34%" };
+      if (paneId === "sub2") return { left: "50%", top: 0, width: "50%", height: "34%" };
+      if (paneId === "main") return { left: 0, top: "34%", width: "100%", height: "66%" };
+      return { display: "none" };
+    }
+    // quad (4面図)
+    if (paneId === "sub1") return { left: 0, top: 0, width: "33.3333%", height: "32%" };
+    if (paneId === "sub2") return { left: "33.3333%", top: 0, width: "33.3334%", height: "32%" };
+    if (paneId === "sub3") return { left: "66.6667%", top: 0, width: "33.3333%", height: "32%" };
+    return { left: 0, top: "32%", width: "100%", height: "68%" };
+  };
+
   return (
     <div
+      ref={containerRef}
       className="relative h-full w-full overflow-hidden"
       style={{
         backgroundColor: "#141519",
@@ -1558,17 +1762,12 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
           "radial-gradient(circle at 22% 18%, rgba(56, 189, 248, 0.09), transparent 46%), radial-gradient(circle at 82% 80%, rgba(14, 165, 233, 0.065), transparent 44%)",
       }}
     >
+      {/* WebGL キャンバス本体（描画専用） */}
+      <div ref={mountRef} className="pointer-events-none absolute inset-0" />
+
+      {/* 4ペイン独立操作レイヤー（マウスオーバー中のペインをそのまま回転・パン・ズーム可能） */}
       <div
-        ref={mountRef}
-        className={`h-full w-full ${
-          measureMode
-            ? "cursor-crosshair"
-            : navMode === "windowZoom"
-              ? "cursor-zoom-in"
-              : navMode === "orbit"
-                ? "cursor-move"
-                : "cursor-grab active:cursor-grabbing"
-        }`}
+        className="absolute inset-0"
         onMouseMove={handleMouseMove}
         onMouseLeave={() => {
           setHoverInfo(null);
@@ -1578,13 +1777,32 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
         }}
         onMouseDown={handleMouseDown}
         onMouseUp={handleMouseUp}
-      />
+      >
+        {ALL_PANE_IDS.map((paneId) => (
+          <div
+            key={paneId}
+            ref={(el) => {
+              paneDivRefs.current[paneId] = el;
+            }}
+            style={getPaneBoxStyle(paneId)}
+            onMouseEnter={() => {
+              activePaneRef.current = paneId;
+            }}
+            className={`absolute ${paneCursorClass}`}
+          />
+        ))}
+      </div>
 
       <ViewportOverlays
         containerWidth={viewportSize.width}
         containerHeight={viewportSize.height}
         displayOptions={displayOptions}
         onUpdateDisplayOptions={onUpdateDisplayOptions}
+        paneAngles={paneAngles}
+        onSelectPaneAngle={(paneId, action) => {
+          activePaneRef.current = paneId;
+          applyPaneAngle(paneId, action);
+        }}
         navMode={navMode}
         onSelectNavMode={(mode) => {
           setMeasureMode(false);
@@ -1620,6 +1838,7 @@ export const ToolpathViewport: React.FC<ToolpathViewportProps> = ({
         isViewportMaximized={isViewportMaximized}
         onToggleMaximizeViewport={onToggleMaximizeViewport}
         onApplyCameraPreset={applyCameraPreset}
+        onResetViews={resetAllViewsToDefault}
       />
 
       <TraceBar

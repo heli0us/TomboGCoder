@@ -206,6 +206,7 @@ export interface DisplayOptions {
   showCompensatedPath: boolean;
   showToolModel: boolean;
   showToolWidthFill: boolean;
+  snapToolOutline: boolean;
   showGrid: boolean;
   showBoundingBox: boolean;
   colorByTool: boolean;
@@ -305,6 +306,7 @@ export const DEFAULT_DISPLAY_OPTIONS: DisplayOptions = {
   showCompensatedPath: true,
   showToolModel: true,
   showToolWidthFill: false,
+  snapToolOutline: false,
   showGrid: true,
   showBoundingBox: false,
   colorByTool: false,

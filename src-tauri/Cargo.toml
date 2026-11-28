@@ -1,6 +1,6 @@
 [package]
 name = "tombo-gcoder"
-version = "0.2.0"
+version = "0.3.0"
 description = "FANUC 3軸マシニングセンタ向け NCプログラムビューア＆検証ツール"
 authors = ["TomboGCoder"]
 edition = "2021"

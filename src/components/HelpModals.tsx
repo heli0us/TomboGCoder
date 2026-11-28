@@ -88,6 +88,7 @@ export const HelpModal: React.FC<HelpModalProps> = ({ mode, isMac, onClose }) =>
                       ["画面の平行移動 (パン)", "左 / 中ドラッグ"],
                       ["3D回転 (オービット)", "右 / Shift+中ドラッグ"],
                       ["全体表示へフィット", "中ダブルクリック / F"],
+                      ["2点間計測 ON/OFF", "M (Escで終了)"],
                       ["窓ズーム (範囲拡大)", "ビュー左上 窓ボタン"],
                     ] as const
                   ).map(([label, key]) => (

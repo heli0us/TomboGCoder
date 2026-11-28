@@ -221,8 +221,15 @@ export function extractSnapPoints(segments: PathSegment[]): SnapPoint[] {
   return list;
 }
 
-/** Group 内の全メッシュ・ラインの GPU リソースを安全に解放する */
+/** Group 内の全メッシュ・ライン・スプライトの GPU リソースを安全に解放する */
 export function disposeGroupChildren(group: THREE.Group): void {
+  const disposeMat = (m: THREE.Material | undefined) => {
+    if (!m) return;
+    if ("map" in m && (m as THREE.SpriteMaterial).map) {
+      (m as THREE.SpriteMaterial).map?.dispose();
+    }
+    m.dispose();
+  };
   while (group.children.length > 0) {
     const obj = group.children.pop()!;
     obj.traverse((node) => {
@@ -231,17 +238,226 @@ export function disposeGroupChildren(group: THREE.Group): void {
       }
       if ("material" in node) {
         const mat = (node as THREE.Mesh).material;
-        if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
-        else mat?.dispose();
+        if (Array.isArray(mat)) mat.forEach(disposeMat);
+        else disposeMat(mat);
       }
     });
   }
+}
+
+/** 軸ラベル用の高解像度ビルボードスプライトを生成 */
+function createAxisLabelSprite(letter: "X" | "Y" | "Z", colorHex: string): THREE.Sprite {
+  const size = 128;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+
+  if (ctx) {
+    const c = size * 0.5;
+    ctx.font = "700 72px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    // 軌道線と重なっても読めるよう極細のダーク縁取りのみ付与
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 10;
+    ctx.strokeStyle = "rgba(14, 16, 22, 0.88)";
+    ctx.strokeText(letter, c, c + 2);
+    ctx.fillStyle = colorHex;
+    ctx.fillText(letter, c, c + 2);
+  }
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+
+  const mat = new THREE.SpriteMaterial({
+    map: tex,
+    transparent: true,
+    opacity: 0.72,
+    depthTest: false,
+    depthWrite: false,
+  });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(0.36, 0.36, 1);
+  sprite.renderOrder = 13;
+  return sprite;
+}
+
+/** 画面相対サイズのモダン CAD 風 UCS 原点ギズモ（矢印＋X/Y/Zビルボードラベル＋原点キューブ）を構築 */
+export function buildOriginUcsGizmo(screenPx = 48): THREE.Group {
+  const root = new THREE.Group();
+  root.userData.screenPx = screenPx;
+  root.renderOrder = 12;
+
+  const shaftLen = 0.78;
+  const shaftRadius = 0.022;
+  const headLen = 0.22;
+  const headRadius = 0.072;
+
+  const axes: Array<{
+    letter: "X" | "Y" | "Z";
+    colorHex: string;
+    colorNum: number;
+    dir: THREE.Vector3;
+  }> = [
+    { letter: "X", colorHex: "#f87171", colorNum: 0xf87171, dir: new THREE.Vector3(1, 0, 0) },
+    { letter: "Y", colorHex: "#4ade80", colorNum: 0x4ade80, dir: new THREE.Vector3(0, 1, 0) },
+    { letter: "Z", colorHex: "#60a5fa", colorNum: 0x60a5fa, dir: new THREE.Vector3(0, 0, 1) },
+  ];
+
+  const up = new THREE.Vector3(0, 1, 0);
+
+  for (const ax of axes) {
+    const mat = new THREE.MeshBasicMaterial({
+      color: ax.colorNum,
+      transparent: true,
+      opacity: 0.65,
+      depthTest: false,
+      depthWrite: false,
+    });
+    const quat = new THREE.Quaternion().setFromUnitVectors(up, ax.dir);
+
+    // 軸シャフト
+    const shaftGeo = new THREE.CylinderGeometry(shaftRadius, shaftRadius, shaftLen, 10);
+    const shaft = new THREE.Mesh(shaftGeo, mat);
+    shaft.quaternion.copy(quat);
+    shaft.position.copy(ax.dir).multiplyScalar(shaftLen * 0.5);
+    shaft.renderOrder = 12;
+
+    // 矢印ヘッド
+    const headGeo = new THREE.ConeGeometry(headRadius, headLen, 14);
+    const head = new THREE.Mesh(headGeo, mat.clone());
+    head.quaternion.copy(quat);
+    head.position.copy(ax.dir).multiplyScalar(shaftLen + headLen * 0.5);
+    head.renderOrder = 12;
+
+    // ビルボード文字ラベル（どの角度から見ても常に正面向き）
+    const label = createAxisLabelSprite(ax.letter, ax.colorHex);
+    label.position.copy(ax.dir).multiplyScalar(1.18);
+
+    root.add(shaft, head, label);
+  }
+
+  // 原点センターマーク（CAD UCS 風の極小キューブ＋細枠）
+  const originGeo = new THREE.BoxGeometry(0.11, 0.11, 0.11);
+  const originMat = new THREE.MeshBasicMaterial({
+    color: 0xe2e8f0,
+    transparent: true,
+    opacity: 0.62,
+    depthTest: false,
+    depthWrite: false,
+  });
+  const originCube = new THREE.Mesh(originGeo, originMat);
+  originCube.renderOrder = 13;
+  root.add(originCube);
+
+  return root;
+}
+
+export type OutlineRole = "outer" | "inner" | "side" | "hole";
+
+export interface TypedOutlinePolyline {
+  role: OutlineRole;
+  points: Point3[];
+}
+
+/** 1セグメント分の工具径外周ポリライン列を役割（outer/inner/side/hole）付きで返す */
+export function getSegmentTypedOutlines(seg: PathSegment): TypedOutlinePolyline[] {
+  const isCutXY =
+    seg.motionType === "linear" ||
+    seg.motionType === "arc_cw" ||
+    seg.motionType === "arc_ccw";
+  const isCanned = seg.motionType === "canned_feed";
+  if (!isCutXY && !isCanned) return [];
+
+  const dia = seg.modalState.toolDiameter > 0 ? seg.modalState.toolDiameter : 6.0;
+  const r = dia * 0.5;
+  if (r <= 1e-4) return [];
+
+  const buildCirclePts = (cx: number, cy: number, z: number): Point3[] => {
+    const sides = 24;
+    const pts: Point3[] = [];
+    for (let k = 0; k <= sides; k++) {
+      const a = (k / sides) * Math.PI * 2;
+      pts.push({ x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r, z });
+    }
+    return pts;
+  };
+
+  if (isCanned) {
+    return [{ role: "hole", points: buildCirclePts(seg.end.x, seg.end.y, seg.end.z) }];
+  }
+
+  let skipLeft = false;
+  let skipRight = false;
+  const isArc =
+    seg.arcCenter !== null && (seg.motionType === "arc_ccw" || seg.motionType === "arc_cw");
+  if (isArc && seg.arcCenter) {
+    const arcR = Math.hypot(seg.start.x - seg.arcCenter.x, seg.start.y - seg.arcCenter.y);
+    if (arcR <= r + 0.05) {
+      if (seg.motionType === "arc_ccw") skipLeft = true;
+      else skipRight = true;
+    }
+  }
+
+  const pts = seg.points;
+  const leftPts: Point3[] = [];
+  const rightPts: Point3[] = [];
+
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i];
+    const p1 = pts[i + 1];
+    const dx = p1.x - p0.x;
+    const dy = p1.y - p0.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-4) continue;
+    const nx = (-dy / len) * r;
+    const ny = (dx / len) * r;
+
+    if (!skipLeft) {
+      if (leftPts.length === 0) leftPts.push({ x: p0.x + nx, y: p0.y + ny, z: p0.z });
+      leftPts.push({ x: p1.x + nx, y: p1.y + ny, z: p1.z });
+    }
+    if (!skipRight) {
+      if (rightPts.length === 0) rightPts.push({ x: p0.x - nx, y: p0.y - ny, z: p0.z });
+      rightPts.push({ x: p1.x - nx, y: p1.y - ny, z: p1.z });
+    }
+  }
+
+  // G03(反時計回り)は左が内側・右が外側、G02(時計回り)は左が外側・右が内側
+  const leftRole: OutlineRole = isArc
+    ? seg.motionType === "arc_ccw"
+      ? "inner"
+      : "outer"
+    : "side";
+  const rightRole: OutlineRole = isArc
+    ? seg.motionType === "arc_ccw"
+      ? "outer"
+      : "inner"
+    : "side";
+
+  const out: TypedOutlinePolyline[] = [];
+  if (leftPts.length >= 2) out.push({ role: leftRole, points: leftPts });
+  if (rightPts.length >= 2) out.push({ role: rightRole, points: rightPts });
+
+  // 垂直プランジ（XY移動なし・Z降下）の場合は穴底円を返す
+  if (out.length === 0 && seg.end.z < seg.start.z - 1e-4) {
+    out.push({ role: "hole", points: buildCirclePts(seg.end.x, seg.end.y, seg.end.z) });
+  }
+  return out;
+}
+
+/** 1セグメント分の工具径外周ポリライン列（左オフセット・右オフセット・または穴底円）を返す */
+export function getSegmentOutlinePolylines(seg: PathSegment): Point3[][] {
+  return getSegmentTypedOutlines(seg).map((o) => o.points);
 }
 
 /** 切削パスから本家風の工具外周輪郭線（左右オフセット線＋外角円弧＋端点半円／穴底円）を構築 */
 export function buildToolWidthFillMesh(
   segments: PathSegment[],
   colorByTool: boolean,
+  opts?: { overrideColor?: number; opacity?: number; depthTest?: boolean },
 ): THREE.LineSegments | null {
   const positions: number[] = [];
   const colors: number[] = [];
@@ -454,9 +670,12 @@ export function buildToolWidthFillMesh(
 
     const dia = seg.modalState.toolDiameter > 0 ? seg.modalState.toolDiameter : 6.0;
     const r = dia * 0.5;
-    const col = colorByTool
-      ? new THREE.Color(getToolColor(seg.toolNumber))
-      : new THREE.Color("#a78bfa");
+    const col =
+      opts?.overrideColor !== undefined
+        ? new THREE.Color(opts.overrideColor)
+        : colorByTool
+          ? new THREE.Color(getToolColor(seg.toolNumber))
+          : new THREE.Color("#a78bfa");
 
     // 固定サイクル穴あけ（G81/G83/G84等）：穴底に工具径の真円リングを描画
     if (isCanned) {
@@ -561,7 +780,8 @@ export function buildToolWidthFillMesh(
   const mat = new THREE.LineBasicMaterial({
     vertexColors: true,
     transparent: true,
-    opacity: 0.68,
+    opacity: opts?.opacity ?? 0.68,
+    depthTest: opts?.depthTest ?? true,
   });
   return new THREE.LineSegments(geom, mat);
 }
